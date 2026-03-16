@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Komfy Bridge</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      width: 280px;
+      background: #0f1117;
+      color: #e0e0e0;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid #1e2030;
+    }
+    .header img { width: 22px; height: 22px; border-radius: 4px; }
+    .header h1 { font-size: 14px; font-weight: 600; color: #fff; letter-spacing: 0.2px; }
+
+    /* Update banner */
+    #update-banner {
+      display: none;
+      background: #ef4444;
+      color: white;
+      padding: 10px 16px;
+      font-size: 12px;
+      font-weight: bold;
+      text-align: center;
+      border-bottom: 1px solid #7f1d1d;
+    }
+    #update-banner a {
+      color: white;
+      text-decoration: underline;
+      font-weight: normal;
+      margin-top: 4px;
+      display: inline-block;
+    }
+
+    /* Status dot */
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px;
+      border-bottom: 1px solid #1e2030;
+    }
+    .status-label { font-size: 12px; color: #8b909a; }
+    .badge {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.green  { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+    .dot.red    { background: #ef4444; }
+    .dot.yellow { background: #f59e0b; }
+
+    /* Info block */
+    .info-block {
+      padding: 10px 16px;
+      border-bottom: 1px solid #1e2030;
+    }
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }
+    .info-key { font-size: 11px; color: #8b909a; }
+    .info-val {
+      font-size: 11px;
+      font-family: 'Courier New', monospace;
+      color: #a5b4fc;
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+    .info-val.ok  { color: #22c55e; font-family: inherit; }
+    .info-val.err { color: #ef4444; font-family: inherit; }
+
+    /* Button */
+    .btn {
+      display: block;
+      width: calc(100% - 32px);
+      margin: 12px 16px;
+      padding: 8px;
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      letter-spacing: 0.2px;
+    }
+    .btn { background: #6366f1; }
+    .btn:hover { background: #4f46e5; }
+    .btn:active { transform: scale(0.98); }
+    .btn.success { background: #22c55e; }
+    .btn.secondary {
+      background: transparent;
+      border: 1px solid #2e3144;
+      color: #8b909a;
+      margin-top: 0;
+    }
+    .btn.secondary:hover { background: #1e2030; color: #e0e0e0; }
+
+    /* Version */
+    .version-row {
+      padding: 6px 16px 10px;
+      font-size: 10px;
+      color: #3d4250;
+      text-align: right;
+    }
+
+    /* Hint */
+    .hint {
+      padding: 8px 16px 14px;
+      font-size: 11px;
+      color: #5a606e;
+      line-height: 1.5;
+    }
+    .hint a { color: #6366f1; text-decoration: none; }
+    .hint a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <img src="icon-32.png" alt="icon">
+    <h1>Komfy Bridge</h1>
+  </div>
+
+  <div id="update-banner">
+    🚀 Update Available: v<span id="update-version"></span><br>
+    <a href="#" id="update-link">Click here to download ZIP</a>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">Komfy Studio</span>
+    <span class="badge">
+      <span class="dot" id="dot-studio"></span>
+      <span id="studio-status">Checking...</span>
+    </span>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">Google Session</span>
+    <span class="badge">
+      <span class="dot" id="dot-token"></span>
+      <span id="token-status">No token</span>
+    </span>
+  </div>
+
+  <div class="info-block">
+    <div class="info-item">
+      <span class="info-key">Project</span>
+      <span class="info-val" id="project-id">—</span>
+    </div>
+    <div class="info-item">
+      <span class="info-key">Last sync</span>
+      <span class="info-val" id="last-sync">—</span>
+    </div>
+  </div>
+
+  <button class="btn" id="btn-sync">↻ Force Sync</button>
+  <button class="btn secondary" id="btn-open-flow">↗ Open Flow Tab</button>
+
+  <div class="version-row" id="version-row">v2.0.0</div>
+
+  <div class="hint" id="hint-text">
+    Open <a href="https://labs.google/fx/tools/flow" target="_blank">Google Flow</a> and sign in to capture your session.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

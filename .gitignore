@@ -1,0 +1,15 @@
+# OS generated
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Node
+node_modules/
+
+# Build artifacts
+*.crx
+*.pem
+*.zip
