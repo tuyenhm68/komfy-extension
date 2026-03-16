@@ -13,3 +13,4 @@ node_modules/
 *.crx
 *.pem
 *.zip
+*.ps1
