@@ -4,14 +4,13 @@
 
 .DESCRIPTION
     This script automates the version release process by:
-    1. Auto-incrementing version from latest git tag
-    2. Updating the version in manifest.json
-    3. Creating a ZIP package with all extension files
-    4. Committing and pushing changes
-    5. Creating a GitHub Release with the ZIP as an asset
+    1. Reading version from manifest.json (next mode) or using specified version
+    2. Creating a ZIP package with all extension files + modules/
+    3. Committing and pushing changes
+    4. Creating a GitHub Release with the ZIP as an asset
 
     MODES:
-    - next [comment]: Auto-increment from latest tag and publish release
+    - next [comment]: Use version from manifest.json and publish release
     - (version) [comment]: Specify exact version to publish
     - -d (version): Delete a tag/release locally and remotely
 
@@ -56,34 +55,6 @@ $EXTENSION_FILES = @(
     "icon-128.png"
 )
 
-function Get-LatestVersion {
-    try {
-        $latestTag = git tag --sort=-v:refname | Select-Object -First 1
-        if ([string]::IsNullOrEmpty($latestTag)) {
-            Write-Host "No existing tags. Starting from v2.0.0" -ForegroundColor Yellow
-            return "2.0.0"
-        }
-        $ver = $latestTag -replace '^v', ''
-        Write-Host "Latest version: v$ver" -ForegroundColor Cyan
-        return $ver
-    } catch {
-        Write-Error "Failed to get latest version: $_"
-        exit 1
-    }
-}
-
-function Get-NextVersion {
-    param([string]$CurrentVersion)
-    if ($CurrentVersion -match '^(\d+)\.(\d+)\.(\d+)$') {
-        $next = "$([int]$matches[1]).$([int]$matches[2]).$([int]$matches[3] + 1)"
-        Write-Host "Next version: v$next" -ForegroundColor Green
-        return $next
-    } else {
-        Write-Error "Invalid version: $CurrentVersion"
-        exit 1
-    }
-}
-
 function Get-GitHubToken {
     try {
         $result = echo "url=https://github.com" | git credential fill 2>$null
@@ -100,15 +71,26 @@ $IsNextMode = $false
 
 if ($Version -eq "next") {
     $IsNextMode = $true
-    $currentVersion = Get-LatestVersion
-    $VersionNum = Get-NextVersion -CurrentVersion $currentVersion
+    # Read version directly from manifest.json (source of truth during dev)
+    $mPath = "manifest.json"
+    if (-not (Test-Path $mPath)) {
+        Write-Error "manifest.json not found in current directory."
+        exit 1
+    }
+    $mData = Get-Content $mPath -Raw | ConvertFrom-Json
+    $VersionNum = $mData.version
+    if (-not $VersionNum) {
+        Write-Error "No version field in manifest.json"
+        exit 1
+    }
     $VersionTag = "v$VersionNum"
+    Write-Host "Version from manifest.json: $VersionTag" -ForegroundColor Cyan
 } else {
     if ($Version -match "^v?(\d+\.\d+\.\d+)$") {
         $VersionNum = $matches[1]
         $VersionTag = "v$VersionNum"
     } else {
-        Write-Error "Invalid version. Use semantic versioning (e.g., 2.1.0) or 'next'."
+        Write-Error "Invalid version. Use semantic versioning or 'next'."
         exit 1
     }
 }
@@ -119,7 +101,7 @@ if ($Delete) {
     Write-Host "DELETING release: $VersionTag" -ForegroundColor Red
     git tag -d $VersionTag 2>$null
     git push origin --delete $VersionTag 2>$null
-    
+
     $token = Get-GitHubToken
     if ($token) {
         try {
@@ -147,29 +129,58 @@ Write-Host "================================================" -ForegroundColor C
 Write-Host ""
 
 # Step 1: Update manifest.json
-Write-Host "[1/5] Updating manifest.json..." -ForegroundColor Yellow
-$manifestPath = "manifest.json"
-$manifestContent = Get-Content $manifestPath -Raw | ConvertFrom-Json
-$oldVersion = $manifestContent.version
-$manifestContent.version = $VersionNum
-$manifestContent | ConvertTo-Json -Depth 10 | Set-Content $manifestPath -Encoding UTF8
-Write-Host "  OK: $oldVersion -> $VersionNum" -ForegroundColor Green
+if ($IsNextMode) {
+    Write-Host "[1/5] manifest.json already at v$VersionNum" -ForegroundColor DarkGray
+} else {
+    Write-Host "[1/5] Updating manifest.json..." -ForegroundColor Yellow
+    $mPath = "manifest.json"
+    $mRaw = Get-Content $mPath -Raw
+    $mObj = $mRaw | ConvertFrom-Json
+    $oldVer = $mObj.version
+    $dq = [char]34
+    $findStr = $dq + 'version' + $dq + ':  ' + $dq + $oldVer + $dq
+    $replStr = $dq + 'version' + $dq + ':  ' + $dq + $VersionNum + $dq
+    $mRaw = $mRaw.Replace($findStr, $replStr)
+    Set-Content $mPath -Value $mRaw -Encoding UTF8 -NoNewline
+    Write-Host "  OK: $oldVer -> $VersionNum" -ForegroundColor Green
+}
 
 # Step 2: Create ZIP
 Write-Host "[2/5] Creating ZIP package..." -ForegroundColor Yellow
 $zipName = "v$VersionNum.zip"
 $zipPath = Join-Path $env:TEMP $zipName
+$stagingDir = Join-Path $env:TEMP "komfy-ext-staging"
 
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
 
-$filePaths = $EXTENSION_FILES | ForEach-Object { 
+$fileCount = 0
+$EXTENSION_FILES | ForEach-Object {
     $fp = Join-Path (Get-Location) $_
-    if (Test-Path $fp) { $fp } else { Write-Warning "  Missing: $_" }
-} | Where-Object { $_ }
+    if (Test-Path $fp) {
+        Copy-Item $fp -Destination $stagingDir
+        $fileCount++
+    } else {
+        Write-Warning "  Missing: $_"
+    }
+}
 
-Compress-Archive -Path $filePaths -DestinationPath $zipPath -Force
+# Include modules/ directory
+$modulesDir = Join-Path (Get-Location) "modules"
+if (Test-Path $modulesDir) {
+    $destModules = Join-Path $stagingDir "modules"
+    Copy-Item $modulesDir -Destination $destModules -Recurse
+    $modFiles = Get-ChildItem $destModules -File
+    $fileCount += $modFiles.Count
+    Write-Host "  Included modules/: $($modFiles.Count) files" -ForegroundColor DarkGray
+}
+
+Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 $zipSize = [math]::Round((Get-Item $zipPath).Length / 1024, 1)
-Write-Host "  OK: $zipName ($zipSize KB, $($filePaths.Count) files)" -ForegroundColor Green
+$zipInfo = "  OK: " + $zipName + " - " + $zipSize + " KB, " + $fileCount + " files"
+Write-Host $zipInfo -ForegroundColor Green
 
 # Step 3: Git operations
 Write-Host "[3/5] Git commit + tag + push..." -ForegroundColor Yellow
@@ -197,11 +208,9 @@ if (-not $token) {
     Write-Host ""
     Write-Host "================================================" -ForegroundColor Yellow
     Write-Host "  No GitHub token. Create release manually:" -ForegroundColor Yellow
-    Write-Host "  1. Go to: https://github.com/$REPO_OWNER/$REPO_NAME/releases/new" -ForegroundColor White
-    Write-Host "  2. Choose tag: $VersionTag" -ForegroundColor White
-    Write-Host "  3. Title: v$VersionNum - $Comment" -ForegroundColor White
-    Write-Host "  4. Upload: $zipPath" -ForegroundColor White
-    Write-Host "  5. Publish release" -ForegroundColor White
+    Write-Host "  https://github.com/$REPO_OWNER/$REPO_NAME/releases/new" -ForegroundColor White
+    Write-Host "  Tag: $VersionTag" -ForegroundColor White
+    Write-Host "  Upload: $zipPath" -ForegroundColor White
     Write-Host "================================================" -ForegroundColor Yellow
     exit 0
 }
