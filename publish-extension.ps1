@@ -99,8 +99,8 @@ if ($Version -eq "next") {
 if ($Delete) {
     Write-Host ""
     Write-Host "DELETING release: $VersionTag" -ForegroundColor Red
-    git tag -d $VersionTag 2>$null
-    git push origin --delete $VersionTag 2>$null
+    git tag -d $VersionTag 2>$null; $null = $LASTEXITCODE
+    git push origin --delete $VersionTag 2>$null; $null = $LASTEXITCODE
 
     $token = Get-GitHubToken
     if ($token) {
