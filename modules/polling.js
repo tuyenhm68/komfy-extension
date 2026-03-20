@@ -117,7 +117,8 @@ async function processTask(task) {
             
             const body = JSON.parse(task.body);
             const prompt = body.requests?.[0]?.textInput?.structuredPrompt?.parts?.[0]?.text || 'A beautiful scene';
-            const aspectRatio = body.requests?.[0]?.aspectRatio || 'VIDEO_ASPECT_RATIO_LANDSCAPE';
+            const aspectRatio = body.uiAspectRatio || body.requests?.[0]?.aspectRatio || '16:9';
+            const resolutionMultiplier = body.resolutionMultiplier || 'x1';
             // body.projectName duoc set boi flow-broker-api.js (vd: "Test - komfy-studio")
             const pName = body.projectName || null;
             const videoModelKey = body.requests?.[0]?.videoModelKey || null;
@@ -136,20 +137,21 @@ async function processTask(task) {
                 videoModelKey: videoModelKey
             };
             
-            console.log('[Komfy] I2V task via UI | endpoint:', task.endpoint, '| model:', targetVideoModel2, '| type:', videoType2);
-            result = await generateViaUI(prompt, aspectRatio, pName, videoModelKey, i2vPayload, targetVideoModel2, videoType2, body.imageInputs || [], task.requestId);
+            console.log('[Komfy] I2V task via UI | endpoint:', task.endpoint, '| model:', targetVideoModel2, '| type:', videoType2, '| aspect:', aspectRatio, '| res:', resolutionMultiplier);
+            result = await generateViaUI(prompt, aspectRatio, pName, videoModelKey, i2vPayload, targetVideoModel2, videoType2, body.imageInputs || [], task.requestId, resolutionMultiplier);
 
 
         } else if (task.endpoint.includes('batchGenerateImages')) {
             // Image generation (Nano Banana 2 / Pro): tu dong chuyen sang Image mode
             const body = JSON.parse(task.body);
             const prompt = body.prompt || body.textInput?.structuredPrompt?.parts?.[0]?.text || 'A beautiful image';
-            const aspectRatio = body.aspectRatio || 'Auto';
+            const aspectRatio = body.aspectRatio || '16:9';
+            const imageType = body.imageType || 'Ingredients';
             const modelName = body.modelName || 'Nano Banana 2';
             const pName = body.projectName || null;
             const imageInputs = body.imageInputs || []; // Array of data URLs
-            console.log('[Komfy] Image task | project:', pName, '| model:', modelName, '| images:', imageInputs.length, '| prompt:', prompt.substring(0, 40));
-            result = await generateImageViaUI(prompt, aspectRatio, modelName, pName, imageInputs, task.requestId);
+            console.log('[Komfy] Image task | project:', pName, '| model:', modelName, '| aspect:', aspectRatio, '| type:', imageType, '| images:', imageInputs.length);
+            result = await generateImageViaUI(prompt, aspectRatio, imageType, modelName, pName, imageInputs, task.requestId);
 
         } else if (task.endpoint === 'DOWNLOAD_MEDIA_BLOB') {
             if (!sessionData.bearerToken) {

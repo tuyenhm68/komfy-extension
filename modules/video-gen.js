@@ -66,7 +66,8 @@ async function generateViaUI(
     targetVideoModelParam = null,
     videoType = 'Ingredients',
     imageInputs = [],
-    requestId = null
+    requestId = null,
+    resolutionMultiplier = 'x1'
 ) {
     // --- Resolve target model BEFORE mutex ---
     let targetVideoModel;
@@ -83,11 +84,7 @@ async function generateViaUI(
         ? 'Frames'
         : (videoType || 'Ingredients');
 
-    const wantPortrait = aspectRatio && (
-        aspectRatio.includes('PORTRAIT') || aspectRatio.includes('portrait') ||
-        aspectRatio === '9:16' || aspectRatio === '3:4'
-    );
-    const targetOrient = wantPortrait ? 'PORTRAIT' : 'LANDSCAPE';
+    // aspectRatio is now direct (16:9, 9:16) — no orientation mapping needed
 
     // --- Acquire UI Mutex ---
     let releaseMutex;
@@ -247,7 +244,7 @@ async function generateViaUI(
         // =============================================
         // Phase B0: Settings popover
         // =============================================
-        await runSettingsPhase(send, sleep, { targetVideoModel, resolvedVideoType, aspectRatio, targetOrient });
+        await runSettingsPhase(send, sleep, { targetVideoModel, resolvedVideoType, aspectRatio, resolutionMultiplier });
 
         // =============================================
         // Phase: Snapshot truoc submit

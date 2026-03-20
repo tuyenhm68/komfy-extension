@@ -221,18 +221,29 @@ async function selectVideoTab(send, sleep) {
 }
 
 // --- B0.3: Chon subtype (Frames / Ingredients) ---
+// Vietnamese locale: "Frames" = "Khung hình", "Ingredients" = "Thành phần"
 async function selectSubtype(send, sleep, targetSubtype) {
     let confirmed = false;
+
+    // Build list of text variants to match (English + Vietnamese)
+    const subtypeVariants = {
+        'frames': ['frames', 'khung hình'],
+        'ingredients': ['ingredients', 'thành phần'],
+    };
+    const targetLower = targetSubtype.toLowerCase();
+    const matchTexts = subtypeVariants[targetLower] || [targetLower];
 
     const verify = async () => {
         const v = await send('Runtime.evaluate', {
             expression: `(function(){
-                var target = '${targetSubtype}'.toLowerCase();
+                var matchTexts = ${JSON.stringify(matchTexts)};
                 var tabs = document.querySelectorAll('[role="tab"]');
                 for (var i = 0; i < tabs.length; i++) {
                     var t = (tabs[i].textContent||'').trim().toLowerCase();
-                    if (t === target || t.includes(target)) {
-                        return { selected: tabs[i].getAttribute('aria-selected') === 'true', text: (tabs[i].textContent||'').trim().substring(0,30) };
+                    for (var m = 0; m < matchTexts.length; m++) {
+                        if (t === matchTexts[m] || t.includes(matchTexts[m])) {
+                            return { selected: tabs[i].getAttribute('aria-selected') === 'true', text: (tabs[i].textContent||'').trim().substring(0,30) };
+                        }
                     }
                 }
                 return null;
@@ -245,14 +256,21 @@ async function selectSubtype(send, sleep, targetSubtype) {
     for (let stry = 0; stry < 12 && !confirmed; stry++) {
         const tabInfoResult = await send('Runtime.evaluate', {
             expression: `(function(){
-                var target = '${targetSubtype}'.toLowerCase();
+                var matchTexts = ${JSON.stringify(matchTexts)};
                 var allTabs = [...document.querySelectorAll('[role="tab"]')].map(function(t) {
                     var r = t.getBoundingClientRect();
                     return { text: (t.textContent||'').trim().substring(0,30), selected: t.getAttribute('aria-selected'), visible: r.width > 0 && r.height > 0, x: r.left+r.width/2, y: r.top+r.height/2 };
                 });
                 var visible = allTabs.filter(function(t){ return t.visible; });
-                var match = visible.find(function(t){ return t.text.toLowerCase() === target; });
-                if (!match) match = visible.find(function(t){ return t.text.toLowerCase().includes(target); });
+                var match = null;
+                for (var m = 0; m < matchTexts.length && !match; m++) {
+                    match = visible.find(function(t){ return t.text.toLowerCase() === matchTexts[m]; });
+                }
+                if (!match) {
+                    for (var m = 0; m < matchTexts.length && !match; m++) {
+                        match = visible.find(function(t){ return t.text.toLowerCase().includes(matchTexts[m]); });
+                    }
+                }
                 return { match, allVisible: visible.map(function(t){ return t.text + ':' + t.selected; }) };
             })()`,
             returnByValue: true,
@@ -277,9 +295,12 @@ async function selectSubtype(send, sleep, targetSubtype) {
         if (method === 'jsclick') {
             await send('Runtime.evaluate', {
                 expression: `(function(){
-                    var target = '${targetSubtype}'.toLowerCase();
+                    var matchTexts = ${JSON.stringify(matchTexts)};
                     var tabs = [...document.querySelectorAll('[role="tab"]')];
-                    var tab = tabs.find(function(t){ var tt=(t.textContent||'').trim().toLowerCase(); return tt===target||tt.includes(target); });
+                    var tab = null;
+                    for (var m = 0; m < matchTexts.length && !tab; m++) {
+                        tab = tabs.find(function(t){ var tt=(t.textContent||'').trim().toLowerCase(); return tt===matchTexts[m]||tt.includes(matchTexts[m]); });
+                    }
                     if (tab && tab.getBoundingClientRect().width > 0) { tab.click(); return 'clicked:' + (tab.textContent||'').trim(); }
                     return 'not found';
                 })()`,
@@ -292,9 +313,12 @@ async function selectSubtype(send, sleep, targetSubtype) {
         } else {
             await send('Runtime.evaluate', {
                 expression: `(function(){
-                    var target = '${targetSubtype}'.toLowerCase();
+                    var matchTexts = ${JSON.stringify(matchTexts)};
                     var tabs = [...document.querySelectorAll('[role="tab"]')];
-                    var tab = tabs.find(function(t){ var tt=(t.textContent||'').trim().toLowerCase(); return tt===target||tt.includes(target); });
+                    var tab = null;
+                    for (var m = 0; m < matchTexts.length && !tab; m++) {
+                        tab = tabs.find(function(t){ var tt=(t.textContent||'').trim().toLowerCase(); return tt===matchTexts[m]||tt.includes(matchTexts[m]); });
+                    }
                     if (!tab) return 'not found';
                     ['pointerover','pointerenter'].forEach(function(n){ tab.dispatchEvent(new PointerEvent(n,{bubbles:true,composed:true})); });
                     tab.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,composed:true,isPrimary:true}));
@@ -321,57 +345,63 @@ async function selectSubtype(send, sleep, targetSubtype) {
     await sleep(200);
 }
 
-// --- B0.4: Chon orientation (LANDSCAPE / PORTRAIT) ---
-async function selectOrientation(send, sleep, aspectRatio) {
-    const wantPortrait = aspectRatio && (
-        aspectRatio.includes('PORTRAIT') || aspectRatio.includes('portrait') ||
-        aspectRatio === '9:16' || aspectRatio === '3:4'
-    );
-    const targetOrient = wantPortrait ? 'PORTRAIT' : 'LANDSCAPE';
+// --- B0.4: Chon aspect ratio pill (16:9, 9:16) ---
+async function selectAspectRatio(send, sleep, aspectRatio) {
+    // Map old orientation values to new aspect ratios for backward compat
+    let targetRatio = aspectRatio || '16:9';
+    if (targetRatio.includes('PORTRAIT') || targetRatio === 'portrait') targetRatio = '9:16';
+    if (targetRatio.includes('LANDSCAPE') || targetRatio === 'landscape') targetRatio = '16:9';
 
-    const orientTabInfo = await send('Runtime.evaluate', {
+    const ratioBtnInfo = await send('Runtime.evaluate', {
         expression: `(function(){
-            var target = '${targetOrient}';
+            var target = '${targetRatio}';
             var scope = document.querySelector('[data-radix-popper-content-wrapper]') || document;
-            var byId = scope.querySelector('[id$="-trigger-' + target + '"]');
-            if (byId) { var r = byId.getBoundingClientRect(); if (r.width > 0) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2 }; }
             var tabs = scope.querySelectorAll('[role="tab"]');
             for (var i = 0; i < tabs.length; i++) {
-                var t = (tabs[i].textContent||'').trim().toUpperCase();
-                var tid = (tabs[i].id||'').toUpperCase();
+                var t = (tabs[i].textContent||'').trim();
                 var r = tabs[i].getBoundingClientRect();
                 if (r.width === 0) continue;
-                if (t === target || tid.includes(target)) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2 };
+                if (t === target || t.includes(target)) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2, text: t };
+            }
+            // Fallback: ID match
+            var ratioId = target.replace(':', '-');
+            for (var i = 0; i < tabs.length; i++) {
+                var elId = (tabs[i].id||'');
+                var r = tabs[i].getBoundingClientRect();
+                if (r.width === 0) continue;
+                if (elId.includes(ratioId) || elId.includes(target)) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2, id: elId };
             }
             return { found: false };
         })()`,
         returnByValue: true,
     });
-    const orientTab = orientTabInfo?.result?.value;
-    if (orientTab?.found) {
-        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: orientTab.x, y: orientTab.y, button: 'left', clickCount: 1 });
+    const ratioBtn = ratioBtnInfo?.result?.value;
+    if (ratioBtn?.found) {
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: ratioBtn.x, y: ratioBtn.y, button: 'left', clickCount: 1 });
         await sleep(60);
-        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: orientTab.x, y: orientTab.y, button: 'left', clickCount: 1 });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: ratioBtn.x, y: ratioBtn.y, button: 'left', clickCount: 1 });
         await sleep(300);
-        console.log('[Komfy Video] B0.4 ✅ Orientation:', targetOrient);
+        console.log('[Komfy Video] B0.4 ✅ Aspect ratio:', targetRatio);
     } else {
-        console.warn('[Komfy Video] B0.4 ⚠️ Orientation tab not found:', targetOrient);
+        console.warn('[Komfy Video] B0.4 ⚠️ Aspect ratio pill not found:', targetRatio);
     }
 }
 
-// --- B0.5: Chon x1 ---
-async function selectX1(send, sleep) {
-    let x1Done = false;
-    for (let x1Retry = 0; x1Retry < 3 && !x1Done; x1Retry++) {
-        const x1TabInfo = await send('Runtime.evaluate', {
+// --- B0.5: Chon resolution multiplier (x1, x2, x3, x4) ---
+async function selectResolutionMultiplier(send, sleep, resMultiplier) {
+    const target = resMultiplier || 'x1';
+    let done = false;
+    for (let retry = 0; retry < 3 && !done; retry++) {
+        const tabInfo = await send('Runtime.evaluate', {
             expression: `(function(){
+                var target = '${target}';
                 var sliderTabs = document.querySelectorAll('.flow_tab_slider_trigger');
                 if (sliderTabs.length === 0) sliderTabs = document.querySelectorAll('[role="tab"]');
                 for (var i = 0; i < sliderTabs.length; i++) {
                     var t = (sliderTabs[i].textContent||'').trim();
                     var r = sliderTabs[i].getBoundingClientRect();
                     if (r.width === 0 || r.height === 0) continue;
-                    if (t === 'x1') return { found: true, x: r.left+r.width/2, y: r.top+r.height/2, selected: sliderTabs[i].getAttribute('aria-selected') === 'true', dataState: sliderTabs[i].getAttribute('data-state') };
+                    if (t === target) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2, selected: sliderTabs[i].getAttribute('aria-selected') === 'true', dataState: sliderTabs[i].getAttribute('data-state') };
                 }
                 var debug = [];
                 for (var i = 0; i < sliderTabs.length; i++) {
@@ -382,22 +412,22 @@ async function selectX1(send, sleep) {
             })()`,
             returnByValue: true,
         });
-        const x1Tab = x1TabInfo?.result?.value;
-        console.log('[Komfy Video] B0.5 attempt', x1Retry, ':', JSON.stringify(x1Tab));
-        if (x1Tab?.found) {
-            if (x1Tab.selected || x1Tab.dataState === 'active') {
-                console.log('[Komfy Video] B0.5 ✅ x1 already selected');
-                x1Done = true;
+        const tab = tabInfo?.result?.value;
+        console.log('[Komfy Video] B0.5 attempt', retry, '| target:', target, '| result:', JSON.stringify(tab));
+        if (tab?.found) {
+            if (tab.selected || tab.dataState === 'active') {
+                console.log('[Komfy Video] B0.5 ✅', target, 'already selected');
+                done = true;
             } else {
-                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: x1Tab.x, y: x1Tab.y, button: 'left', clickCount: 1 });
+                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: tab.x, y: tab.y, button: 'left', clickCount: 1 });
                 await sleep(60);
-                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x1Tab.x, y: x1Tab.y, button: 'left', clickCount: 1 });
+                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: tab.x, y: tab.y, button: 'left', clickCount: 1 });
                 await sleep(300);
-                console.log('[Komfy Video] B0.5 ✅ x1 clicked');
-                x1Done = true;
+                console.log('[Komfy Video] B0.5 ✅', target, 'clicked');
+                done = true;
             }
         } else {
-            console.warn('[Komfy Video] B0.5 x1 not found, debug:', JSON.stringify(x1Tab?.debug));
+            console.warn('[Komfy Video] B0.5', target, 'not found, debug:', JSON.stringify(tab?.debug));
             await sleep(400);
         }
     }
@@ -548,16 +578,17 @@ async function verifyVideoMode(send, sleep) {
 }
 
 // --- Facade: Chay toan bo settings phase B0 ---
-async function runSettingsPhase(send, sleep, { targetVideoModel, resolvedVideoType, aspectRatio, targetOrient }) {
+async function runSettingsPhase(send, sleep, { targetVideoModel, resolvedVideoType, aspectRatio, resolutionMultiplier }) {
     console.log('[Komfy Video] B0 Setup popover settings...');
     await openPopover(send, sleep);
     await selectVideoTab(send, sleep);
     await selectSubtype(send, sleep, resolvedVideoType);
-    await selectOrientation(send, sleep, aspectRatio);
-    await selectX1(send, sleep);
+    await selectAspectRatio(send, sleep, aspectRatio);
+    await selectResolutionMultiplier(send, sleep, resolutionMultiplier || 'x1');
     await selectModel(send, sleep, targetVideoModel);
+
     await closePopover(send, sleep);
-    console.log('[Komfy Video] B0.7 Popover closed. Settings: model=' + targetVideoModel + ' orient=' + targetOrient + ' type=' + resolvedVideoType);
+    console.log('[Komfy Video] B0.7 Popover closed. Settings: model=' + targetVideoModel + ' aspect=' + aspectRatio + ' res=' + (resolutionMultiplier || 'x1') + ' type=' + resolvedVideoType);
     // Verify va tu dong fix neu mode sai
     await assertVideoMode(send, sleep, { resolvedVideoType });
 }

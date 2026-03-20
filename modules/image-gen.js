@@ -162,7 +162,7 @@ if (typeof __cdpSessionMutexTail === 'undefined') {
     var __cdpSessionMutexTail = Promise.resolve();
 }
 
-async function generateImageViaUI(prompt, aspectRatio, modelName, projectName = null, imageInputs = [], requestId = null) {
+async function generateImageViaUI(prompt, aspectRatio, imageType, modelName, projectName = null, imageInputs = [], requestId = null) {
     // Acquire UI mutex — cho den khi task truoc do xong phase submit
     let releaseMutex;
     const mutexAcquired = new Promise(resolve => { releaseMutex = resolve; });
@@ -669,107 +669,128 @@ async function generateImageViaUI(prompt, aspectRatio, modelName, projectName = 
 
 
 
-        // B6: Chon Orientation (Landscape/Portrait) bang CDP mouse event THAT
-        // Giong B1: JS tim element va lay toa do dong → CDP dispatch mouse event
-        // Khong hardcode toa do - getBoundingClientRect() tra ve CSS pixel, CDP dung CSS pixel → khop nhau
-        const wantPortrait = aspectRatio === '9:16' || aspectRatio === '3:4' ||
-            aspectRatio === 'portrait' || aspectRatio === 'IMAGE_ASPECT_RATIO_PORTRAIT';
-        const targetOrientation = wantPortrait ? 'PORTRAIT' : 'LANDSCAPE';
-        console.log('[Komfy] B6 Aspect ratio:', aspectRatio, '-> target:', targetOrientation);
+        // B6: Select Aspect Ratio pill (16:9, 4:3, 1:1, 3:4, 9:16)
+        // Flow UI uses pill buttons with text matching the ratio
+        const targetAspectRatio = aspectRatio || '16:9';
+        console.log('[Komfy] B6 Target aspect ratio:', targetAspectRatio);
 
-        // Buoc B6.1: Tim toa do cua orientation button qua JS (khong click trong JS)
-        const orientBtnInfo = await send('Runtime.evaluate', {
+        const aspectBtnInfo = await send('Runtime.evaluate', {
             expression: `(function(){
-                var target = '${targetOrientation}'; // 'PORTRAIT' hoac 'LANDSCAPE'
-                var targetLower = target.toLowerCase();
-
-                // Tim theo ID pattern chinh xac: "radix-xxx-trigger-PORTRAIT" / "radix-xxx-trigger-LANDSCAPE"
-                // Uu tien: ID ket thuc bang "-trigger-TARGET"
-                var byId = document.querySelector('[id$="-trigger-' + target + '"]');
-                if (byId) {
-                    var r = byId.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) {
-                        return {
-                            found: true, method: 'id-suffix',
-                            id: byId.id,
-                            x: r.left + r.width / 2,
-                            y: r.top + r.height / 2,
-                            orientation: targetLower
-                        };
-                    }
-                }
-
-                // Fallback: tim theo ID chua target string
+                var target = '${targetAspectRatio}';
+                // Flow UI pills are [role="tab"] elements — textContent includes icon + ratio text
+                // e.g. "⬜ 16:9" so we use includes() instead of exact match
                 var allTabs = document.querySelectorAll('[role="tab"]');
                 for (var i = 0; i < allTabs.length; i++) {
-                    var elId = (allTabs[i].id || '').toUpperCase();
+                    var t = (allTabs[i].textContent || '').trim();
                     var r = allTabs[i].getBoundingClientRect();
                     if (r.width === 0 || r.height === 0) continue;
-                    if (elId.includes(target)) {
+                    if (t === target || t.includes(target)) {
                         return {
-                            found: true, method: 'id-contains',
-                            id: allTabs[i].id,
-                            x: r.left + r.width / 2,
-                            y: r.top + r.height / 2,
-                            orientation: targetLower
-                        };
-                    }
-                }
-
-                // Fallback cuoi: tim theo text
-                for (var i = 0; i < allTabs.length; i++) {
-                    var t = (allTabs[i].textContent || '').toLowerCase().trim();
-                    var r = allTabs[i].getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0) continue;
-                    if ((target === 'PORTRAIT' && (t === 'portrait' || t === 'dọc')) ||
-                        (target === 'LANDSCAPE' && (t === 'landscape' || t === 'ngang'))) {
-                        return {
-                            found: true, method: 'text',
+                            found: true, method: 'text-match',
                             id: allTabs[i].id, text: t,
                             x: r.left + r.width / 2,
-                            y: r.top + r.height / 2,
-                            orientation: targetLower
+                            y: r.top + r.height / 2
                         };
                     }
                 }
-
-                // Debug: liet ke tat ca tabs hien tai
+                // Fallback: match by ID containing the ratio string (e.g. "16:9" -> "16-9")
+                var ratioId = target.replace(':', '-');
+                for (var i = 0; i < allTabs.length; i++) {
+                    var elId = (allTabs[i].id || '');
+                    var r = allTabs[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    if (elId.includes(ratioId) || elId.includes(target)) {
+                        return {
+                            found: true, method: 'id-match',
+                            id: allTabs[i].id,
+                            x: r.left + r.width / 2,
+                            y: r.top + r.height / 2
+                        };
+                    }
+                }
                 var debugTabs = [];
                 for (var i = 0; i < allTabs.length; i++) {
                     var r = allTabs[i].getBoundingClientRect();
-                    if (r.width > 0) debugTabs.push({ id: allTabs[i].id, text: (allTabs[i].textContent||'').trim().substring(0,20) });
+                    if (r.width > 0) debugTabs.push({ id: allTabs[i].id, text: (allTabs[i].textContent||'').trim().substring(0,30), selected: allTabs[i].getAttribute('aria-selected') });
                 }
                 return { found: false, target: target, debugTabs: debugTabs };
             })()`,
             returnByValue: true,
         });
 
-        const orientBtn = orientBtnInfo?.result?.value;
-        console.log('[Komfy] B6 Orient btn info:', JSON.stringify(orientBtn));
+        const aspectBtn = aspectBtnInfo?.result?.value;
+        console.log('[Komfy] B6 Aspect ratio btn:', JSON.stringify(aspectBtn));
 
-        if (orientBtn?.found) {
-            // Buoc B6.2: Dispatch REAL mouse events voi toa do lay tu getBoundingClientRect()
-            // CSS pixel tu getBoundingClientRect() = CSS pixel CDP dung → chinh xac tren moi do phan giai
+        if (aspectBtn?.found) {
             await send('Input.dispatchMouseEvent', {
-                type: 'mousePressed', x: orientBtn.x, y: orientBtn.y, button: 'left', clickCount: 1
+                type: 'mousePressed', x: aspectBtn.x, y: aspectBtn.y, button: 'left', clickCount: 1
             });
             await sleep(60);
             await send('Input.dispatchMouseEvent', {
-                type: 'mouseReleased', x: orientBtn.x, y: orientBtn.y, button: 'left', clickCount: 1
+                type: 'mouseReleased', x: aspectBtn.x, y: aspectBtn.y, button: 'left', clickCount: 1
             });
-            await sleep(400);
-            console.log('[Komfy] B6 ✅ Orientation clicked via CDP:', orientBtn.method, '| id:', orientBtn.id, '| at:', Math.round(orientBtn.x), Math.round(orientBtn.y));
+            await sleep(300);
+            console.log('[Komfy] B6 ✅ Aspect ratio clicked:', aspectBtn.method, aspectBtn.text || aspectBtn.id);
         } else {
-            console.warn('[Komfy] B6 ⚠️ Orientation button NOT found! debugTabs:', JSON.stringify(orientBtn?.debugTabs));
+            console.warn('[Komfy] B6 ⚠️ Aspect ratio pill NOT found! debugTabs:', JSON.stringify(aspectBtn?.debugTabs));
         }
 
+        // B6b: Select Image Type subtype (Ingredients / Frames)
+        // Vietnamese: "Ingredients" = "Thành phần", "Frames" = "Khung hình"
+        const targetImageType = imageType || 'Ingredients';
+        const imageTypeVariants = {
+            'ingredients': ['ingredients', 'thành phần'],
+            'frames': ['frames', 'khung hình'],
+        };
+        const typeMatchTexts = imageTypeVariants[targetImageType.toLowerCase()] || [targetImageType.toLowerCase()];
+        console.log('[Komfy] B6b Target image type:', targetImageType, '| matchTexts:', JSON.stringify(typeMatchTexts));
 
+        const typeBtnInfo = await send('Runtime.evaluate', {
+            expression: `(function(){
+                var matchTexts = ${JSON.stringify(typeMatchTexts)};
+                var allTabs = document.querySelectorAll('[role="tab"]');
+                for (var i = 0; i < allTabs.length; i++) {
+                    var t = (allTabs[i].textContent || '').trim().toLowerCase();
+                    var r = allTabs[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    for (var m = 0; m < matchTexts.length; m++) {
+                        if (t === matchTexts[m] || t.includes(matchTexts[m])) {
+                            return {
+                                found: true, method: 'text-match',
+                                id: allTabs[i].id, text: (allTabs[i].textContent||'').trim(),
+                                x: r.left + r.width / 2,
+                                y: r.top + r.height / 2
+                            };
+                        }
+                    }
+                }
+                return { found: false, target: matchTexts[0] };
+            })()`,
+            returnByValue: true,
+        });
 
-        // B7: DONG POPOVER - chi dung Escape key, khong click vao page de tranh hit search bar
+        const typeBtn = typeBtnInfo?.result?.value;
+        console.log('[Komfy] B6b Image type btn:', JSON.stringify(typeBtn));
+
+        if (typeBtn?.found) {
+            await send('Input.dispatchMouseEvent', {
+                type: 'mousePressed', x: typeBtn.x, y: typeBtn.y, button: 'left', clickCount: 1
+            });
+            await sleep(60);
+            await send('Input.dispatchMouseEvent', {
+                type: 'mouseReleased', x: typeBtn.x, y: typeBtn.y, button: 'left', clickCount: 1
+            });
+            await sleep(300);
+            console.log('[Komfy] B6b ✅ Image type clicked:', typeBtn.text);
+        } else {
+            console.warn('[Komfy] B6b ⚠️ Image type pill NOT found for:', targetImageType);
+        }
+
+        // B7: DONG POPOVER - chi dung Escape key
         await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
         await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' });
         await sleep(400);
-        console.log('[Komfy] B7 Popover closed. Settings configured: model=' + targetModel + ' orientation=' + targetOrientation);
+        console.log('[Komfy] B7 Popover closed. Settings: model=' + targetModel + ' aspect=' + targetAspectRatio + ' type=' + targetImageType);
 
         // Safety check: dam bao khong bi vao edit mode sau khi dong popover
         const postMenuUrl = await send('Runtime.evaluate', {
