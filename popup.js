@@ -6,31 +6,38 @@ document.addEventListener('DOMContentLoaded', () => {
     const tokenStatus  = document.getElementById('token-status');
     const projectIdEl  = document.getElementById('project-id');
     const lastSyncEl   = document.getElementById('last-sync');
-    const hintEl       = document.getElementById('hint-text');
 
-    const updateBanner  = document.getElementById('update-banner');
-    const updateVersion = document.getElementById('update-version');
-    const updateLink    = document.getElementById('update-link');
-    const btnOpenFlow   = document.getElementById('btn-open-flow');
+    const btnReload    = document.getElementById('btn-reload');
 
-    // Nut mo Flow Tab
-    if (btnOpenFlow) {
-        btnOpenFlow.addEventListener('click', () => {
-            chrome.tabs.create({ url: 'https://labs.google/fx/tools/flow', active: true });
-            window.close(); // Dong popup
+    // Show version from manifest dynamically
+    const versionTag = document.getElementById('version-tag');
+    const verSpan = document.getElementById('ver');
+    const manifest = chrome.runtime.getManifest();
+    if (versionTag) versionTag.textContent = 'v' + manifest.version;
+    if (verSpan) verSpan.textContent = manifest.version;
+
+    // Nut Reload thu cong - luon hoat dong sau khi update code
+    const btnReloadManual = document.getElementById('btn-reload-manual');
+    if (btnReloadManual) {
+        btnReloadManual.addEventListener('click', () => {
+            btnReloadManual.textContent = '⏳ Reloading...';
+            btnReloadManual.disabled = true;
+            chrome.runtime.reload();
         });
     }
 
-    // Kiem tra co ban cap nhat khong
-    chrome.storage.local.get(['extensionUpdateAvailable', 'latestVersion', 'updateUrl'], (res) => {
-        if (res.extensionUpdateAvailable) {
-            updateBanner.style.display = 'block';
-            updateVersion.textContent = res.latestVersion || '?';
-            const defaultUrl = 'https://github.com/vibe-project/komfy-studio-public/tree/main/chrome-extension';
-            const dlUrl = res.updateUrl || defaultUrl;
-            updateLink.onclick = () => { chrome.tabs.create({ url: dlUrl }); };
+    // Nut Reload extension (chi hien khi co update tu Komfy Studio)
+    chrome.storage.local.get(['extensionUpdateAvailable'], (res) => {
+        if (res.extensionUpdateAvailable && btnReload) {
+            btnReload.style.display = 'block';
         }
     });
+    if (btnReload) {
+        btnReload.addEventListener('click', () => {
+            chrome.storage.local.set({ extensionUpdateAvailable: false });
+            chrome.runtime.reload();
+        });
+    }
 
     function timeAgo(ms) {
         const s = Math.floor((Date.now() - ms) / 1000);
@@ -47,7 +54,6 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             dotToken.className = 'dot red';
             tokenStatus.textContent = 'No token';
-            if (hintEl) hintEl.style.display = 'block';
         }
 
         // Project ID
@@ -83,15 +89,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Sync button
     btnSync.addEventListener('click', () => {
-        btnSync.textContent = 'Syncing...';
+        btnSync.textContent = '...';
         btnSync.disabled = true;
         chrome.runtime.sendMessage({ action: 'FORCE_SYNC' }, (response) => {
             if (response) updateUI(response);
             btnSync.classList.add('success');
-            btnSync.textContent = '✓ Synced';
+            btnSync.textContent = '✓';
             setTimeout(() => {
                 btnSync.classList.remove('success');
-                btnSync.textContent = '↻ Force Sync';
+                btnSync.textContent = '↻ Sync';
                 btnSync.disabled = false;
             }, 2000);
         });

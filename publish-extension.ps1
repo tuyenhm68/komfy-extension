@@ -157,7 +157,7 @@ Write-Host "  OK: $oldVersion -> $VersionNum" -ForegroundColor Green
 
 # Step 2: Create ZIP
 Write-Host "[2/5] Creating ZIP package..." -ForegroundColor Yellow
-$zipName = "komfy-bridge-v$VersionNum.zip"
+$zipName = "v$VersionNum.zip"
 $zipPath = Join-Path $env:TEMP $zipName
 
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }

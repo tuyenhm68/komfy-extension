@@ -1,0 +1,563 @@
+// ============================================================
+// video-gen-settings.js
+// Phase B0: Settings popover automation
+// Bao gom: open popover, chon Video tab, subtype, orientation,
+//          x1, model, dong popover, verify Video mode.
+// Tat ca ham nhan (send, sleep) lam tham so — no side effects.
+// ============================================================
+
+// --- B0.1: Mo popover bang CDP + JS PointerEvent ---
+async function openPopover(send, sleep) {
+    let opened = false;
+
+    const tryOnce = async () => {
+        for (let attempt = 0; attempt < 10 && !opened; attempt++) {
+            const btnInfo = await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
+                    var allBottomBtns = [];
+                    for (var i = 0; i < btns.length; i++) {
+                        var r = btns[i].getBoundingClientRect();
+                        var t = (btns[i].textContent||'').toLowerCase().trim();
+                        if (r.width < 50 || r.height < 20) continue;
+                        var inBottom = r.bottom > window.innerHeight - 120;
+                        var inLower70 = r.top > window.innerHeight * 0.3;
+                        if (!inBottom && !inLower70) continue;
+                        if (t.includes('arrow_forward') || t === '>' || t.startsWith('add_2') || t.startsWith('add_circle') || t === 'add') continue;
+                        if (t === 'close' || t === 'cancel' || t === '\u2715') continue;
+                        allBottomBtns.push({ w: r.width, x: r.left+r.width/2, y: r.top+r.height/2, text: t.substring(0,40), inBottom });
+                    }
+                    if (!allBottomBtns.length) return { found: false };
+                    var bottomOnly = allBottomBtns.filter(function(b){ return b.inBottom; });
+                    var pool = bottomOnly.length > 0 ? bottomOnly : allBottomBtns;
+                    pool.sort(function(a,b){ return b.w - a.w; });
+                    var best = pool[0];
+                    return { found: true, x: best.x, y: best.y, text: best.text, totalBtns: pool.length };
+                })()`,
+                returnByValue: true,
+            });
+            const btn = btnInfo?.result?.value;
+
+            if (!btn?.found) {
+                if (attempt % 2 === 0) console.log('[Komfy Video] B0.1 No bottom btn found (attempt', attempt, ')');
+                await sleep(300);
+                continue;
+            }
+
+            console.log('[Komfy Video] B0.1 attempt', attempt, '| btns:', btn.totalBtns, '| widest:', btn.text);
+
+            if (attempt % 2 === 0) {
+                // JS PointerEvent (Radix UI responds best)
+                await send('Runtime.evaluate', {
+                    expression: `(function(){
+                        var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
+                        var best = null, bestW = 0;
+                        for (var i = 0; i < btns.length; i++) {
+                            var r = btns[i].getBoundingClientRect();
+                            var t = (btns[i].textContent||'').toLowerCase().trim();
+                            if (r.width < 50 || r.height < 20) continue;
+                            var inBottom = r.bottom > window.innerHeight - 120;
+                            var inLower70 = r.top > window.innerHeight * 0.3;
+                            if (!inBottom && !inLower70) continue;
+                            if (t.includes('arrow_forward') || t === '>' || t.startsWith('add_2') || t.startsWith('add_circle') || t === 'add') continue;
+                            if (t === 'close' || t === 'cancel' || t === '\u2715') continue;
+                            if (r.width > bestW) { bestW = r.width; best = btns[i]; }
+                        }
+                        if (!best) return 'not found';
+                        best.dispatchEvent(new PointerEvent('pointerover', {bubbles:true, composed:true}));
+                        best.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, composed:true, isPrimary:true, button:0}));
+                        best.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, button:0}));
+                        best.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, cancelable:true, composed:true, isPrimary:true, button:0}));
+                        best.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, button:0}));
+                        best.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, button:0}));
+                        return 'js-pointer: ' + (best.textContent||'').trim().substring(0,30);
+                    })()`,
+                    returnByValue: true,
+                    awaitPromise: false,
+                });
+                console.log('[Komfy Video] B0.1 JS PointerEvent dispatched');
+            } else {
+                // CDP mouse event
+                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: btn.x, y: btn.y, button: 'left', clickCount: 1, pointerType: 'mouse' });
+                await sleep(60);
+                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: btn.x, y: btn.y, button: 'left', clickCount: 1, pointerType: 'mouse' });
+                console.log('[Komfy Video] B0.1 CDP mouseEvent at', Math.round(btn.x), Math.round(btn.y));
+            }
+
+            await sleep(600);
+
+            const isOpen = await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var w = document.querySelector('[data-radix-popper-content-wrapper]');
+                    if (!w) return false;
+                    var r = w.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                })()`,
+                returnByValue: true,
+            });
+            if (isOpen?.result?.value) {
+                opened = true;
+                console.log('[Komfy Video] B0.1 ✅ Popover opened (attempt', attempt, ')');
+            } else {
+                console.log('[Komfy Video] B0.1 Popover not open yet (attempt', attempt, '), retry...');
+                await sleep(300);
+            }
+        }
+    };
+
+    await tryOnce();
+
+    if (!opened) {
+        console.warn('[Komfy Video] B0.1 Popover failed → refreshing Flow tab and retrying...');
+        try {
+            await send('Page.reload', { ignoreCache: true });
+            console.log('[Komfy Video] B0.1 Tab reloaded, waiting for page...');
+            for (let w = 0; w < 12; w++) {
+                const barCheck = await send('Runtime.evaluate', {
+                    expression: `(function(){
+                        if (document.querySelector('[role="textbox"],[contenteditable="true"]')) return true;
+                        var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
+                        for (var i = 0; i < btns.length; i++) {
+                            var r = btns[i].getBoundingClientRect();
+                            if (r.width > 50 && r.height > 20) return true;
+                        }
+                        return false;
+                    })()`,
+                    returnByValue: true,
+                });
+                if (barCheck?.result?.value) {
+                    console.log('[Komfy Video] B0.1 Page ready after reload (' + (w * 500) + 'ms)');
+                    break;
+                }
+                await sleep(500);
+            }
+            await sleep(800);
+            await tryOnce();
+        } catch (reloadErr) {
+            console.warn('[Komfy Video] B0.1 Reload error:', reloadErr.message);
+        }
+    }
+
+    if (!opened) throw new Error('[Komfy Video] Khong mo duoc popover! (da thu refresh tab)');
+}
+
+// --- B0.2: Chon tab VIDEO ---
+async function selectVideoTab(send, sleep) {
+    const videoTabInfo = await send('Runtime.evaluate', {
+        expression: `(function(){
+            var scope = document.querySelector('[data-radix-popper-content-wrapper]') || document;
+            var allTabs = [...scope.querySelectorAll('[role="tab"]')].map(function(t) {
+                var r = t.getBoundingClientRect();
+                return { id: t.id, text: (t.textContent||'').trim(), selected: t.getAttribute('aria-selected'), w: r.width, x: r.left+r.width/2, y: r.top+r.height/2 };
+            });
+            var byId = scope.querySelector('[id$="-trigger-VIDEO"],[id$="-trigger-video"],[id$="-trigger-Video"]');
+            if (byId) {
+                var r = byId.getBoundingClientRect();
+                if (r.width > 0) return { found: true, method: 'id-suffix', x: r.left+r.width/2, y: r.top+r.height/2, allTabs, alreadySelected: byId.getAttribute('aria-selected') === 'true' };
+            }
+            for (var i = 0; i < allTabs.length; i++) {
+                if (allTabs[i].text === 'Video' || allTabs[i].text.toLowerCase() === 'video') {
+                    return { found: true, method: 'text', x: allTabs[i].x, y: allTabs[i].y, allTabs, alreadySelected: allTabs[i].selected === 'true' };
+                }
+            }
+            return { found: false, allTabs };
+        })()`,
+        returnByValue: true,
+    });
+    const videoTab = videoTabInfo?.result?.value;
+    console.log('[Komfy Video] B0.2 Video tab:', JSON.stringify({ found: videoTab?.found, method: videoTab?.method, alreadySelected: videoTab?.alreadySelected }));
+
+    if (!videoTab?.found) {
+        console.warn('[Komfy Video] B0.2 ⚠️ Video tab NOT FOUND! allTabs:', JSON.stringify(videoTab?.allTabs));
+        return;
+    }
+    if (videoTab.alreadySelected) {
+        console.log('[Komfy Video] B0.2 Video tab already selected ✅');
+        await sleep(600);
+        return;
+    }
+
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: videoTab.x, y: videoTab.y, button: 'left', clickCount: 1 });
+    await sleep(80);
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: videoTab.x, y: videoTab.y, button: 'left', clickCount: 1 });
+    await sleep(300);
+
+    const verifyVideo = await send('Runtime.evaluate', {
+        expression: `(function(){
+            var scope = document.querySelector('[data-radix-popper-content-wrapper]') || document;
+            var tabs = scope.querySelectorAll('[role="tab"]');
+            for (var i = 0; i < tabs.length; i++) {
+                var t = (tabs[i].textContent||'').trim();
+                if (t === 'Video' || t.toLowerCase() === 'video') return tabs[i].getAttribute('aria-selected') === 'true';
+            }
+            return false;
+        })()`,
+        returnByValue: true,
+    });
+
+    if (verifyVideo?.result?.value) {
+        console.log('[Komfy Video] B0.2 ✅ Video tab selected via CDP');
+    } else {
+        console.warn('[Komfy Video] B0.2 CDP failed, JS PointerEvent fallback...');
+        await send('Runtime.evaluate', {
+            expression: `(function(){
+                var scope = document.querySelector('[data-radix-popper-content-wrapper]') || document;
+                var tabs = [...scope.querySelectorAll('[role="tab"]')];
+                var tab = tabs.find(function(t){ return (t.textContent||'').trim().toLowerCase() === 'video'; });
+                if (!tab) return 'not found';
+                tab.dispatchEvent(new PointerEvent('pointerover',{bubbles:true,composed:true}));
+                tab.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,composed:true,isPrimary:true}));
+                tab.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}));
+                tab.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,composed:true,isPrimary:true}));
+                tab.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,button:0}));
+                tab.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,button:0}));
+                return 'dispatched: ' + (tab.textContent||'').trim();
+            })()`,
+            returnByValue: true,
+        });
+        await sleep(300);
+    }
+    await sleep(600); // Wait for subtype tabs to render
+}
+
+// --- B0.3: Chon subtype (Frames / Ingredients) ---
+async function selectSubtype(send, sleep, targetSubtype) {
+    let confirmed = false;
+
+    const verify = async () => {
+        const v = await send('Runtime.evaluate', {
+            expression: `(function(){
+                var target = '${targetSubtype}'.toLowerCase();
+                var tabs = document.querySelectorAll('[role="tab"]');
+                for (var i = 0; i < tabs.length; i++) {
+                    var t = (tabs[i].textContent||'').trim().toLowerCase();
+                    if (t === target || t.includes(target)) {
+                        return { selected: tabs[i].getAttribute('aria-selected') === 'true', text: (tabs[i].textContent||'').trim().substring(0,30) };
+                    }
+                }
+                return null;
+            })()`,
+            returnByValue: true,
+        });
+        return v?.result?.value;
+    };
+
+    for (let stry = 0; stry < 12 && !confirmed; stry++) {
+        const tabInfoResult = await send('Runtime.evaluate', {
+            expression: `(function(){
+                var target = '${targetSubtype}'.toLowerCase();
+                var allTabs = [...document.querySelectorAll('[role="tab"]')].map(function(t) {
+                    var r = t.getBoundingClientRect();
+                    return { text: (t.textContent||'').trim().substring(0,30), selected: t.getAttribute('aria-selected'), visible: r.width > 0 && r.height > 0, x: r.left+r.width/2, y: r.top+r.height/2 };
+                });
+                var visible = allTabs.filter(function(t){ return t.visible; });
+                var match = visible.find(function(t){ return t.text.toLowerCase() === target; });
+                if (!match) match = visible.find(function(t){ return t.text.toLowerCase().includes(target); });
+                return { match, allVisible: visible.map(function(t){ return t.text + ':' + t.selected; }) };
+            })()`,
+            returnByValue: true,
+        });
+        const tabInfo = tabInfoResult?.result?.value;
+        const match = tabInfo?.match;
+
+        if (stry === 0 || !match) {
+            console.log('[Komfy Video] B0.3 attempt', stry, '| target:', targetSubtype, '| match:', JSON.stringify(match), '| allVisible:', JSON.stringify(tabInfo?.allVisible));
+        }
+
+        if (!match) { await sleep(300); continue; }
+        if (match.selected === 'true') {
+            console.log('[Komfy Video] B0.3 ✅ "' + targetSubtype + '" confirmed (attempt ' + stry + ')');
+            confirmed = true;
+            break;
+        }
+
+        const method = stry < 4 ? 'jsclick' : (stry < 8 ? 'cdp' : 'pointer');
+        console.log('[Komfy Video] B0.3 attempt', stry, '| "' + targetSubtype + '" not selected → try', method);
+
+        if (method === 'jsclick') {
+            await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var target = '${targetSubtype}'.toLowerCase();
+                    var tabs = [...document.querySelectorAll('[role="tab"]')];
+                    var tab = tabs.find(function(t){ var tt=(t.textContent||'').trim().toLowerCase(); return tt===target||tt.includes(target); });
+                    if (tab && tab.getBoundingClientRect().width > 0) { tab.click(); return 'clicked:' + (tab.textContent||'').trim(); }
+                    return 'not found';
+                })()`,
+                returnByValue: true,
+            });
+        } else if (method === 'cdp') {
+            await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: match.x, y: match.y, button: 'left', clickCount: 1 });
+            await sleep(60);
+            await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: match.x, y: match.y, button: 'left', clickCount: 1 });
+        } else {
+            await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var target = '${targetSubtype}'.toLowerCase();
+                    var tabs = [...document.querySelectorAll('[role="tab"]')];
+                    var tab = tabs.find(function(t){ var tt=(t.textContent||'').trim().toLowerCase(); return tt===target||tt.includes(target); });
+                    if (!tab) return 'not found';
+                    ['pointerover','pointerenter'].forEach(function(n){ tab.dispatchEvent(new PointerEvent(n,{bubbles:true,composed:true})); });
+                    tab.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,composed:true,isPrimary:true}));
+                    tab.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}));
+                    tab.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,composed:true,isPrimary:true}));
+                    tab.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,button:0}));
+                    tab.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,button:0}));
+                    return 'PE:' + (tab.textContent||'').trim().substring(0,20);
+                })()`,
+                returnByValue: true,
+            });
+        }
+        await sleep(300);
+    }
+
+    if (!confirmed) {
+        const finalV = await verify();
+        if (finalV?.selected) {
+            console.log('[Komfy Video] B0.3 ✅ "' + targetSubtype + '" confirmed after all attempts');
+        } else {
+            console.warn('[Komfy Video] B0.3 ⚠️ Could not confirm "' + targetSubtype + '" selected! Current:', JSON.stringify(finalV));
+        }
+    }
+    await sleep(200);
+}
+
+// --- B0.4: Chon orientation (LANDSCAPE / PORTRAIT) ---
+async function selectOrientation(send, sleep, aspectRatio) {
+    const wantPortrait = aspectRatio && (
+        aspectRatio.includes('PORTRAIT') || aspectRatio.includes('portrait') ||
+        aspectRatio === '9:16' || aspectRatio === '3:4'
+    );
+    const targetOrient = wantPortrait ? 'PORTRAIT' : 'LANDSCAPE';
+
+    const orientTabInfo = await send('Runtime.evaluate', {
+        expression: `(function(){
+            var target = '${targetOrient}';
+            var scope = document.querySelector('[data-radix-popper-content-wrapper]') || document;
+            var byId = scope.querySelector('[id$="-trigger-' + target + '"]');
+            if (byId) { var r = byId.getBoundingClientRect(); if (r.width > 0) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2 }; }
+            var tabs = scope.querySelectorAll('[role="tab"]');
+            for (var i = 0; i < tabs.length; i++) {
+                var t = (tabs[i].textContent||'').trim().toUpperCase();
+                var tid = (tabs[i].id||'').toUpperCase();
+                var r = tabs[i].getBoundingClientRect();
+                if (r.width === 0) continue;
+                if (t === target || tid.includes(target)) return { found: true, x: r.left+r.width/2, y: r.top+r.height/2 };
+            }
+            return { found: false };
+        })()`,
+        returnByValue: true,
+    });
+    const orientTab = orientTabInfo?.result?.value;
+    if (orientTab?.found) {
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: orientTab.x, y: orientTab.y, button: 'left', clickCount: 1 });
+        await sleep(60);
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: orientTab.x, y: orientTab.y, button: 'left', clickCount: 1 });
+        await sleep(300);
+        console.log('[Komfy Video] B0.4 ✅ Orientation:', targetOrient);
+    } else {
+        console.warn('[Komfy Video] B0.4 ⚠️ Orientation tab not found:', targetOrient);
+    }
+}
+
+// --- B0.5: Chon x1 ---
+async function selectX1(send, sleep) {
+    let x1Done = false;
+    for (let x1Retry = 0; x1Retry < 3 && !x1Done; x1Retry++) {
+        const x1TabInfo = await send('Runtime.evaluate', {
+            expression: `(function(){
+                var sliderTabs = document.querySelectorAll('.flow_tab_slider_trigger');
+                if (sliderTabs.length === 0) sliderTabs = document.querySelectorAll('[role="tab"]');
+                for (var i = 0; i < sliderTabs.length; i++) {
+                    var t = (sliderTabs[i].textContent||'').trim();
+                    var r = sliderTabs[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    if (t === 'x1') return { found: true, x: r.left+r.width/2, y: r.top+r.height/2, selected: sliderTabs[i].getAttribute('aria-selected') === 'true', dataState: sliderTabs[i].getAttribute('data-state') };
+                }
+                var debug = [];
+                for (var i = 0; i < sliderTabs.length; i++) {
+                    var r = sliderTabs[i].getBoundingClientRect();
+                    if (r.width > 0) debug.push((sliderTabs[i].textContent||'').trim().substring(0,10));
+                }
+                return { found: false, debug };
+            })()`,
+            returnByValue: true,
+        });
+        const x1Tab = x1TabInfo?.result?.value;
+        console.log('[Komfy Video] B0.5 attempt', x1Retry, ':', JSON.stringify(x1Tab));
+        if (x1Tab?.found) {
+            if (x1Tab.selected || x1Tab.dataState === 'active') {
+                console.log('[Komfy Video] B0.5 ✅ x1 already selected');
+                x1Done = true;
+            } else {
+                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: x1Tab.x, y: x1Tab.y, button: 'left', clickCount: 1 });
+                await sleep(60);
+                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x1Tab.x, y: x1Tab.y, button: 'left', clickCount: 1 });
+                await sleep(300);
+                console.log('[Komfy Video] B0.5 ✅ x1 clicked');
+                x1Done = true;
+            }
+        } else {
+            console.warn('[Komfy Video] B0.5 x1 not found, debug:', JSON.stringify(x1Tab?.debug));
+            await sleep(400);
+        }
+    }
+}
+
+// --- B0.6: Chon model Veo ---
+async function selectModel(send, sleep, targetVideoModel) {
+    const targetModelLower = targetVideoModel.toLowerCase().replace('veo 3.1 - ', '');
+
+    const modelDropInfo = await send('Runtime.evaluate', {
+        expression: `(function(){
+            var scope = document.querySelector('[data-radix-popper-content-wrapper]') || document;
+            var btns = scope.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                var t = (btns[i].textContent||'').toLowerCase();
+                var r = btns[i].getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                if (t.includes('veo') && (t.includes('arrow_drop_down') || !t.includes('arrow_forward'))) {
+                    return { found: true, x: r.left+r.width/2, y: r.top+r.height/2, text: t.substring(0,40) };
+                }
+            }
+            return { found: false };
+        })()`,
+        returnByValue: true,
+    });
+    const modelDrop = modelDropInfo?.result?.value;
+    console.log('[Komfy Video] B0.6a Model dropdown:', JSON.stringify(modelDrop));
+
+    if (!modelDrop?.found) {
+        console.warn('[Komfy Video] B0.6a ⚠️ Model dropdown not found!');
+        return;
+    }
+
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: modelDrop.x, y: modelDrop.y, button: 'left', clickCount: 1 });
+    await sleep(60);
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: modelDrop.x, y: modelDrop.y, button: 'left', clickCount: 1 });
+    await sleep(500);
+
+    const modelItemInfo = await send('Runtime.evaluate', {
+        expression: `(function(){
+            var want = '${targetModelLower}';
+            var selectors = ['[role="menuitem"]','[role="option"]','[role="listbox"] > *','[data-radix-collection-item]'];
+            var allItems = [];
+            for (var s = 0; s < selectors.length; s++) {
+                var items = document.querySelectorAll(selectors[s]);
+                for (var i = 0; i < items.length; i++) allItems.push(items[i]);
+            }
+            var seen = new Set();
+            allItems = allItems.filter(function(el){ if (seen.has(el)) return false; seen.add(el); return true; });
+            for (var i = 0; i < allItems.length; i++) {
+                var t = (allItems[i].textContent||'').toLowerCase().trim();
+                var r = allItems[i].getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                if (t.includes('veo') && t.includes(want)) return { found: true, text: t.substring(0,40), x: r.left+r.width/2, y: r.top+r.height/2 };
+            }
+            return { found: false, want };
+        })()`,
+        returnByValue: true,
+    });
+    const modelItem = modelItemInfo?.result?.value;
+    console.log('[Komfy Video] B0.6b Model item:', JSON.stringify(modelItem));
+
+    if (modelItem?.found) {
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: modelItem.x, y: modelItem.y, button: 'left', clickCount: 1 });
+        await sleep(60);
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: modelItem.x, y: modelItem.y, button: 'left', clickCount: 1 });
+        await sleep(300);
+        console.log('[Komfy Video] B0.6b ✅ Model selected:', modelItem.text);
+    } else {
+        console.warn('[Komfy Video] B0.6b ⚠️ Model item not found! want:', targetModelLower);
+    }
+    await sleep(300);
+}
+
+// --- B0.7: Dong popover ---
+async function closePopover(send, sleep) {
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Escape', code: 'Escape' });
+    await sleep(300);
+
+    // Focus vao textbox prompt ngay sau Escape — khong click vao page de tranh hit search bar
+    await send('Runtime.evaluate', {
+        expression: `(function(){
+            var tb = document.querySelector('[role="textbox"],[contenteditable="true"]');
+            if (tb) { tb.focus(); return 'focused'; }
+            return 'no-textbox';
+        })()`,
+        returnByValue: true,
+        awaitPromise: false,
+    });
+    await sleep(200);
+}
+
+// --- B0.8: Kiem tra + FIX Video mode tu bottom bar ---
+// Tra ve true neu dang o Video mode, false neu dang o Image mode.
+// Neu mode sai, tu dong mo popover lai va chon Video tab.
+async function assertVideoMode(send, sleep, retrySettings) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const barResult = await send('Runtime.evaluate', {
+            expression: `(function(){
+                var btns = document.querySelectorAll('button,[role="button"]');
+                var found = [];
+                for (var i = 0; i < btns.length; i++) {
+                    var r = btns[i].getBoundingClientRect();
+                    if (r.bottom > window.innerHeight - 150 && r.width > 60) {
+                        found.push((btns[i].textContent||'').trim().substring(0,80));
+                    }
+                }
+                return found.join(' | ');
+            })()`,
+            returnByValue: true,
+        });
+        const finalBar = barResult?.result?.value || '';
+        const barLower = finalBar.toLowerCase();
+        // ★ FIX: "crop" keyword alone is NOT enough — Nano Banana Pro's detail view
+        //   shows "crop_9_16" or "crop_square" which falsely matches.
+        //   Must ALSO verify that the model is actually Veo, not Banana/Imagen.
+        const hasVeoIndicator = barLower.includes('veo') || barLower.includes('video');
+        const hasCropOnly = barLower.includes('crop');
+        const isImageModel = barLower.includes('banana') || barLower.includes('imagen') || barLower.includes('nano');
+        const inVideoMode = hasVeoIndicator || (hasCropOnly && !isImageModel);
+
+        if (inVideoMode) {
+            console.log('[Komfy Video] ✅ Video mode confirmed (attempt ' + attempt + '): ' + finalBar.substring(0, 50));
+            return true;
+        }
+
+        console.warn('[Komfy Video] ⚠️ NOT in Video mode (attempt ' + attempt + ')! Bottom bar: "' + finalBar.substring(0, 60) + '" — Re-selecting Video tab...');
+
+        // Mo popover va chon lai Video tab
+        await openPopover(send, sleep);
+        await selectVideoTab(send, sleep);
+        if (retrySettings) {
+            // Cung chon lai subtype neu duoc yeu cau
+            await selectSubtype(send, sleep, retrySettings.resolvedVideoType);
+        }
+        await closePopover(send, sleep);
+        await sleep(500);
+    }
+
+    console.warn('[Komfy Video] ❌ Could not confirm Video mode after 3 attempts — continuing anyway');
+    return false;
+}
+
+// Backward compat alias
+async function verifyVideoMode(send, sleep) {
+    return assertVideoMode(send, sleep, null);
+}
+
+// --- Facade: Chay toan bo settings phase B0 ---
+async function runSettingsPhase(send, sleep, { targetVideoModel, resolvedVideoType, aspectRatio, targetOrient }) {
+    console.log('[Komfy Video] B0 Setup popover settings...');
+    await openPopover(send, sleep);
+    await selectVideoTab(send, sleep);
+    await selectSubtype(send, sleep, resolvedVideoType);
+    await selectOrientation(send, sleep, aspectRatio);
+    await selectX1(send, sleep);
+    await selectModel(send, sleep, targetVideoModel);
+    await closePopover(send, sleep);
+    console.log('[Komfy Video] B0.7 Popover closed. Settings: model=' + targetVideoModel + ' orient=' + targetOrient + ' type=' + resolvedVideoType);
+    // Verify va tu dong fix neu mode sai
+    await assertVideoMode(send, sleep, { resolvedVideoType });
+}

@@ -1,8 +1,8 @@
 ﻿{
     "manifest_version":  3,
     "name":  "Komfy Bridge",
-    "version":  "2.0.0",
-    "description":  "Connects Komfy Studio to AI platforms â€” enables image \u0026 video generation directly from your workflow.",
+    "version":  "2.0.1",
+    "description":  "Connects Komfy Studio to AI platforms ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â enables image \u0026 video generation directly from your workflow.",
     "icons":  {
                   "16":  "icon-16.png",
                   "32":  "icon-32.png",

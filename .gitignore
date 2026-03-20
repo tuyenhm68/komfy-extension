@@ -14,3 +14,4 @@ node_modules/
 *.pem
 *.zip
 *.ps1
+*.bak

@@ -1,4 +1,4 @@
-// MAIN world - co quyen truy cap vao page context cua labs.google
+﻿// MAIN world - co quyen truy cap vao page context cua labs.google
 // Thuc hien UI automation de tao video thay vi goi API truc tiep
 
 // Guard: tranh inject nhieu lan (background co the inject lai khi restart)
@@ -6,7 +6,8 @@ if (window.__KOMFY_LOADED__) {
     console.log('[Komfy] content_main.js already loaded, skipping re-init');
 } else {
 window.__KOMFY_LOADED__ = true;
-console.log('[Komfy] content_main.js loaded v1.8');
+console.log('[Komfy] content_main.js loaded v2.0.37');
+
 
 function getProjectIdFromUrl() {
     const match = window.location.href.match(/\/project\/([a-zA-Z0-9_-]+)/);
@@ -228,3 +229,5 @@ setTimeout(grabRecaptcha, 2000);
 setInterval(grabRecaptcha, 120000);
 
 } // end if (!window.__KOMFY_LOADED__)
+
+

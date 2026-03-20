@@ -23,6 +23,10 @@ window.addEventListener('message', (event) => {
         console.log('[Komfy DEBUG]', event.data.msg);
         try { chrome.runtime.sendMessage({ action: 'DEBUG_LOG', msg: event.data.msg }); } catch(e) {}
     }
+
+    if (event.data.type === 'KOMFY_DEBUG_FETCH') {
+        try { chrome.runtime.sendMessage({ action: 'DEBUG_LOG', msg: `FETCH: ${event.data.url}\nBODY: ${event.data.body}` }); } catch(e) {}
+    }
 });
 
 // Nhan lenh tu background.js de thuc hien UI automation

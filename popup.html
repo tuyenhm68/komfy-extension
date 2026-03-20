@@ -23,25 +23,65 @@
     }
     .header img { width: 22px; height: 22px; border-radius: 4px; }
     .header h1 { font-size: 14px; font-weight: 600; color: #fff; letter-spacing: 0.2px; }
+    .header .version-tag {
+      font-size: 10px;
+      color: #5a606e;
+      font-weight: 400;
+      margin-left: -4px;
+      align-self: center;
+    }
+    .header .spacer { flex: 1; }
+    .btn-sync-small {
+      background: transparent;
+      border: 1px solid #2e3144;
+      color: #8b909a;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .btn-sync-small:hover {
+      background: #1e2030;
+      color: #e0e0e0;
+      border-color: #3d4250;
+    }
+    .btn-sync-small:active { transform: scale(0.96); }
+    .btn-sync-small.success {
+      border-color: #22c55e;
+      color: #22c55e;
+    }
 
-    /* Update banner */
-    #update-banner {
+    /* Reload button (shown when update delivered via Komfy Studio) */
+    .btn.reload {
       display: none;
-      background: #ef4444;
-      color: white;
-      padding: 10px 16px;
-      font-size: 12px;
-      font-weight: bold;
-      text-align: center;
-      border-bottom: 1px solid #7f1d1d;
+      background: #22c55e;
+      margin-top: 0;
     }
-    #update-banner a {
-      color: white;
-      text-decoration: underline;
-      font-weight: normal;
-      margin-top: 4px;
-      display: inline-block;
+    .btn.reload:hover { background: #16a34a; }
+
+    /* Manual reload button - always visible */
+    .btn-reload-manual {
+      display: block;
+      width: calc(100% - 32px);
+      margin: 0 16px 12px;
+      padding: 7px;
+      background: transparent;
+      color: #f59e0b;
+      border: 1px solid #f59e0b55;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      letter-spacing: 0.2px;
     }
+    .btn-reload-manual:hover { background: #f59e0b22; border-color: #f59e0b; }
+    .btn-reload-manual:active { transform: scale(0.97); }
+    .divider { height: 1px; background: #1e2030; margin: 4px 0; }
 
     /* Status dot */
     .status-row {
@@ -113,31 +153,7 @@
     .btn:hover { background: #4f46e5; }
     .btn:active { transform: scale(0.98); }
     .btn.success { background: #22c55e; }
-    .btn.secondary {
-      background: transparent;
-      border: 1px solid #2e3144;
-      color: #8b909a;
-      margin-top: 0;
-    }
-    .btn.secondary:hover { background: #1e2030; color: #e0e0e0; }
 
-    /* Version */
-    .version-row {
-      padding: 6px 16px 10px;
-      font-size: 10px;
-      color: #3d4250;
-      text-align: right;
-    }
-
-    /* Hint */
-    .hint {
-      padding: 8px 16px 14px;
-      font-size: 11px;
-      color: #5a606e;
-      line-height: 1.5;
-    }
-    .hint a { color: #6366f1; text-decoration: none; }
-    .hint a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -145,12 +161,12 @@
   <div class="header">
     <img src="icon-32.png" alt="icon">
     <h1>Komfy Bridge</h1>
+    <span class="version-tag" id="version-tag"></span>
+    <div class="spacer"></div>
+    <button class="btn-sync-small" id="btn-sync" title="Force Sync">↻ Sync</button>
   </div>
 
-  <div id="update-banner">
-    🚀 Update Available: v<span id="update-version"></span><br>
-    <a href="#" id="update-link">Click here to download ZIP</a>
-  </div>
+
 
   <div class="status-row">
     <span class="status-label">Komfy Studio</span>
@@ -179,14 +195,10 @@
     </div>
   </div>
 
-  <button class="btn" id="btn-sync">↻ Force Sync</button>
-  <button class="btn secondary" id="btn-open-flow">↗ Open Flow Tab</button>
+  <button class="btn reload" id="btn-reload">↻ Reload to update</button>
 
-  <div class="version-row" id="version-row">v2.0.0</div>
-
-  <div class="hint" id="hint-text">
-    Open <a href="https://labs.google/fx/tools/flow" target="_blank">Google Flow</a> and sign in to capture your session.
-  </div>
+  <div class="divider"></div>
+  <button class="btn-reload-manual" id="btn-reload-manual" title="Reload extension sau khi update code">🔄 Reload Extension (v<span id="ver"></span>)</button>
 
   <script src="popup.js"></script>
 </body>
