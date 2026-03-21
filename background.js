@@ -24,6 +24,7 @@ importScripts(
     'modules/video-gen.js',
     'modules/image-gen.js',
     'modules/download.js',
+    'modules/direct-generate.js',
     'modules/polling.js'
 );
 

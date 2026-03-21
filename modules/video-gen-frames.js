@@ -43,7 +43,7 @@ async function selectFrameFromPicker(slotType, imageDataUrl, send, sleep) {
                 for (var i = 0; i < allEls.length; i++) {
                     var el = allEls[i];
                     var r = el.getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0 || r.top < window.innerHeight * 0.5) continue;
+                    if (r.width === 0 || r.height === 0 || r.height > 120 || r.top < window.innerHeight * 0.5) continue;
                     var t = (el.textContent || '').trim().toLowerCase();
                     var lbl = (el.getAttribute('aria-label') || '').toLowerCase();
                     if (t === targetText || lbl === targetText || lbl.includes(isStart ? 'first' : 'last')) {
@@ -73,7 +73,7 @@ async function selectFrameFromPicker(slotType, imageDataUrl, send, sleep) {
                     for (var i = 0; i < allEls.length; i++) {
                         var el = allEls[i];
                         var r = el.getBoundingClientRect();
-                        if (r.width === 0 || r.top < window.innerHeight * 0.5) continue;
+                        if (r.width === 0 || r.height > 120 || r.top < window.innerHeight * 0.5) continue;
                         var t = (el.textContent||'').trim().toLowerCase();
                         if (t === targetText) return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2) };
                     }

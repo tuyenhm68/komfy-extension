@@ -20,19 +20,27 @@ async function openPopover(send, sleep) {
                         var r = btns[i].getBoundingClientRect();
                         var t = (btns[i].textContent||'').toLowerCase().trim();
                         if (r.width < 50 || r.height < 20) continue;
+                        // ★ Gioi han chieu cao: bottom bar button < 80px, gallery thumbnail > 100px
+                        if (r.height > 80) continue;
                         var inBottom = r.bottom > window.innerHeight - 120;
                         var inLower70 = r.top > window.innerHeight * 0.3;
                         if (!inBottom && !inLower70) continue;
                         if (t.includes('arrow_forward') || t === '>' || t.startsWith('add_2') || t.startsWith('add_circle') || t === 'add') continue;
                         if (t === 'close' || t === 'cancel' || t === '\u2715') continue;
-                        allBottomBtns.push({ w: r.width, x: r.left+r.width/2, y: r.top+r.height/2, text: t.substring(0,40), inBottom });
+                        if (t.includes('play_circle') || t.includes('play_arrow') || t.includes('pause') || t.includes('replay')) continue;
+                        if (t.includes('extend') || t.includes('keyboard_double_arrow') || t.includes('download') || t.includes('hide history') || t.includes('show history')) continue;
+                        // ★ Uu tien button co text model (bottom bar selector)
+                        var hasModelText = t.includes('veo') || t.includes('banana') || t.includes('imagen') || t.includes('gemini') || t.includes('crop') || t.includes('arrow_drop_down') || /x[1-4]/.test(t);
+                        allBottomBtns.push({ w: r.width, x: r.left+r.width/2, y: r.top+r.height/2, text: t.substring(0,40), inBottom, hasModelText });
                     }
                     if (!allBottomBtns.length) return { found: false };
+                    // ★ Uu tien: bottom + co model text > bottom > lower70
+                    var bottomModel = allBottomBtns.filter(function(b){ return b.inBottom && b.hasModelText; });
                     var bottomOnly = allBottomBtns.filter(function(b){ return b.inBottom; });
-                    var pool = bottomOnly.length > 0 ? bottomOnly : allBottomBtns;
+                    var pool = bottomModel.length > 0 ? bottomModel : (bottomOnly.length > 0 ? bottomOnly : allBottomBtns);
                     pool.sort(function(a,b){ return b.w - a.w; });
                     var best = pool[0];
-                    return { found: true, x: best.x, y: best.y, text: best.text, totalBtns: pool.length };
+                    return { found: true, x: best.x, y: best.y, text: best.text, totalBtns: pool.length, hasModelText: best.hasModelText };
                 })()`,
                 returnByValue: true,
             });
@@ -51,18 +59,29 @@ async function openPopover(send, sleep) {
                 await send('Runtime.evaluate', {
                     expression: `(function(){
                         var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
-                        var best = null, bestW = 0;
+                        var candidates = [];
                         for (var i = 0; i < btns.length; i++) {
                             var r = btns[i].getBoundingClientRect();
                             var t = (btns[i].textContent||'').toLowerCase().trim();
                             if (r.width < 50 || r.height < 20) continue;
+                            // ★ Gioi han chieu cao: bottom bar < 80px, gallery thumbnail > 100px
+                            if (r.height > 80) continue;
                             var inBottom = r.bottom > window.innerHeight - 120;
                             var inLower70 = r.top > window.innerHeight * 0.3;
                             if (!inBottom && !inLower70) continue;
                             if (t.includes('arrow_forward') || t === '>' || t.startsWith('add_2') || t.startsWith('add_circle') || t === 'add') continue;
                             if (t === 'close' || t === 'cancel' || t === '\u2715') continue;
-                            if (r.width > bestW) { bestW = r.width; best = btns[i]; }
+                            if (t.includes('play_circle') || t.includes('play_arrow') || t.includes('pause') || t.includes('replay')) continue;
+                            if (t.includes('extend') || t.includes('keyboard_double_arrow') || t.includes('download') || t.includes('hide history') || t.includes('show history')) continue;
+                            var hasModelText = t.includes('veo') || t.includes('banana') || t.includes('imagen') || t.includes('gemini') || t.includes('crop') || t.includes('arrow_drop_down') || /x[1-4]/.test(t);
+                            candidates.push({ el: btns[i], w: r.width, inBottom: inBottom, hasModelText: hasModelText });
                         }
+                        // ★ Uu tien: bottom + model text > bottom > lower70
+                        var bottomModel = candidates.filter(function(c){ return c.inBottom && c.hasModelText; });
+                        var bottomOnly = candidates.filter(function(c){ return c.inBottom; });
+                        var pool = bottomModel.length > 0 ? bottomModel : (bottomOnly.length > 0 ? bottomOnly : candidates);
+                        pool.sort(function(a,b){ return b.w - a.w; });
+                        var best = pool.length > 0 ? pool[0].el : null;
                         if (!best) return 'not found';
                         best.dispatchEvent(new PointerEvent('pointerover', {bubbles:true, composed:true}));
                         best.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, composed:true, isPrimary:true, button:0}));

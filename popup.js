@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const studioStatus = document.getElementById('studio-status');
     const dotToken     = document.getElementById('dot-token');
     const tokenStatus  = document.getElementById('token-status');
+    const projectNameEl = document.getElementById('project-name');
     const projectIdEl  = document.getElementById('project-id');
     const lastSyncEl   = document.getElementById('last-sync');
 
@@ -56,7 +57,8 @@ document.addEventListener('DOMContentLoaded', () => {
             tokenStatus.textContent = 'No token';
         }
 
-        // Project ID
+        // Project name + ID
+        projectNameEl.textContent = data.projectName || '—';
         projectIdEl.textContent = data.projectId
             ? data.projectId.substring(0, 24) + (data.projectId.length > 24 ? '...' : '')
             : '—';

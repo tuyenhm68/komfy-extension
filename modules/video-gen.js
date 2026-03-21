@@ -105,13 +105,14 @@ async function generateViaUI(
     console.log('[Komfy Video] [CDP-Mutex] ✅ Acquired.');
 
     // --- ensureFlowTab SAU KHI co ca 2 mutex ---
-    const tab = await ensureFlowTab(true, projectName);
+    const tab = await ensureFlowTab(false, projectName);
     const tabId = tab.id;
 
     console.log('[Komfy Video] CDP tab:', tabId, 'orient:', aspectRatio, 'model:', targetVideoModel, 'prompt:', prompt.substring(0, 40));
 
+    // Activate tab within window (CDP needs active tab for mouse/keyboard events)
+    // Do NOT focus the Chrome window — avoid stealing OS focus from user
     await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
     await new Promise(r => setTimeout(r, 800));
 
     // --- Attach debugger ---
@@ -202,6 +203,147 @@ async function generateViaUI(
             await sleep(500);
         }
 
+        // ★ DETECT DETAIL VIEW BY DOM
+        // Flow UI can be in Image/Video Detail View with the SAME URL as gallery.
+        // Detail view has a "Done" button in top-right corner, and/or a back arrow "←".
+        // Bottom bar in detail view shows the image model (e.g. "Nano Banana Pro")
+        // and its popover shows ONLY aspect ratio tabs — NO Image/Video tabs.
+        // This causes the Video tab selection to fail completely.
+        const detailViewCheck = await send('Runtime.evaluate', {
+            expression: `(function(){
+                var btns = document.querySelectorAll('button,[role="button"]');
+                // Method 1: Look for "Done" button in top part of page
+                for (var i = 0; i < btns.length; i++) {
+                    var text = (btns[i].textContent||'').trim();
+                    var r = btns[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    if ((text === 'Done' || text === 'Xong') && r.top < 80) {
+                        return { inDetailView: true, method: 'done-btn', x: r.left+r.width/2, y: r.top+r.height/2, text: text };
+                    }
+                }
+                // Method 2: Look for back arrow / "←" in top-left
+                for (var i = 0; i < btns.length; i++) {
+                    var text = (btns[i].textContent||'').trim();
+                    var ariaLabel = (btns[i].getAttribute('aria-label')||'').toLowerCase();
+                    var r = btns[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    if (r.top < 60 && r.left < 80 && (text === 'arrow_back' || text === '←' || ariaLabel.includes('back'))) {
+                        return { inDetailView: true, method: 'back-btn', x: r.left+r.width/2, y: r.top+r.height/2, text: text };
+                    }
+                }
+                // Method 3: Check for "Download" button (only in detail view)
+                for (var i = 0; i < btns.length; i++) {
+                    var text = (btns[i].textContent||'').trim().toLowerCase();
+                    var r = btns[i].getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    if (r.top < 60 && (text.includes('download') || text === 'tải xuống')) {
+                        for (var j = 0; j < btns.length; j++) {
+                            var t2 = (btns[j].textContent||'').trim();
+                            var r2 = btns[j].getBoundingClientRect();
+                            if ((t2 === 'Done' || t2 === 'Xong') && r2.width > 0) {
+                                return { inDetailView: true, method: 'download-found-done', x: r2.left+r2.width/2, y: r2.top+r2.height/2, text: t2 };
+                            }
+                        }
+                        return { inDetailView: true, method: 'download-no-done', x: 0, y: 0 };
+                    }
+                }
+                // Method 4: Check for play_circle (video player) — only present in video detail view
+                var hasPlayCircle = false;
+                for (var i = 0; i < btns.length; i++) {
+                    var text = (btns[i].textContent||'').trim().toLowerCase();
+                    if (text.includes('play_circle') || text.includes('play_arrow')) { hasPlayCircle = true; break; }
+                }
+                // Method 5: Check for "Extend" button (keyboard_double_arrow_right) — video detail view
+                var hasExtend = false;
+                for (var i = 0; i < btns.length; i++) {
+                    var text = (btns[i].textContent||'').trim().toLowerCase();
+                    if (text.includes('extend') || text.includes('keyboard_double_arrow_right')) { hasExtend = true; break; }
+                }
+                // Method 6: Check for "Hide history" / "Show history" (detail view sidebar)
+                var hasHistoryBtn = false;
+                for (var i = 0; i < btns.length; i++) {
+                    var text = (btns[i].textContent||'').trim().toLowerCase();
+                    if (text.includes('hide history') || text.includes('show history') || text.includes('ẩn lịch sử')) { hasHistoryBtn = true; break; }
+                }
+                // ★ FIX: play_circle va extend cung xuat hien o gallery view (video preview, extend button).
+                // Chi tin tuong khi co >= 2 signals VA khong co textbox (detail view khong co prompt box).
+                // hasHistoryBtn la signal manh nhat (chi co trong detail view sidebar).
+                var signals = (hasPlayCircle ? 1 : 0) + (hasExtend ? 1 : 0) + (hasHistoryBtn ? 1 : 0);
+                if (signals >= 2) {
+                    var hasTb = !!(document.querySelector('[role="textbox"],[contenteditable="true"]'));
+                    if (!hasTb) {
+                        return { inDetailView: true, method: 'video-detail-signals', signals: signals, hasPlayCircle: hasPlayCircle, hasExtend: hasExtend, hasHistoryBtn: hasHistoryBtn, hasTb: hasTb, x: 0, y: 0 };
+                    }
+                }
+                return { inDetailView: false };
+            })()`,
+            returnByValue: true,
+        });
+        const detailView = detailViewCheck?.result?.value || {};
+        console.log('[Komfy Video] Detail view check:', JSON.stringify(detailView));
+
+        if (detailView.inDetailView) {
+            console.log('[Komfy Video] ⚠️ DETAIL VIEW detected! method:', detailView.method, '| Clicking', detailView.text, 'to return to gallery...');
+
+            if (detailView.x > 0 && detailView.y > 0) {
+                // Click the Done/Back button via CDP mouse events (JS .click() doesn't work on Flow)
+                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: detailView.x, y: detailView.y, button: 'left', clickCount: 1, pointerType: 'mouse' });
+                await sleep(80);
+                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: detailView.x, y: detailView.y, button: 'left', clickCount: 1, pointerType: 'mouse' });
+                await sleep(1500);
+                console.log('[Komfy Video] ✅ Clicked "' + detailView.text + '" — waiting for gallery to load...');
+            } else {
+                // Fallback: press Escape multiple times + navigate to base URL
+                console.log('[Komfy Video] No clickable button found, using Escape + URL navigation fallback...');
+                for (let esc = 0; esc < 5; esc++) {
+                    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' });
+                    await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Escape', code: 'Escape' });
+                    await sleep(300);
+                }
+                // Navigate to base project URL
+                const baseUrlResult = await send('Runtime.evaluate', {
+                    expression: `(function(){
+                        var m = window.location.href.match(/(.*\\/project\\/[a-zA-Z0-9_-]+)/);
+                        return m ? m[1] : window.location.href;
+                    })()`,
+                    returnByValue: true,
+                });
+                const baseUrl = baseUrlResult?.result?.value;
+                if (baseUrl) {
+                    await send('Runtime.evaluate', {
+                        expression: `window.location.href = ${JSON.stringify(baseUrl)};`,
+                        awaitPromise: false,
+                    });
+                    await sleep(2000);
+                }
+            }
+
+            // Wait for gallery to be ready
+            for (let gw = 0; gw < 15; gw++) {
+                const galleryReady = await send('Runtime.evaluate', {
+                    expression: `(function(){
+                        // Gallery is ready when: textbox exists AND no "Done" button in top area
+                        var hasTb = !!(document.querySelector('[role="textbox"],[contenteditable="true"]'));
+                        var hasDone = false;
+                        var btns = document.querySelectorAll('button,[role="button"]');
+                        for (var i = 0; i < btns.length; i++) {
+                            var t = (btns[i].textContent||'').trim();
+                            var r = btns[i].getBoundingClientRect();
+                            if ((t === 'Done' || t === 'Xong') && r.top < 80 && r.width > 0) { hasDone = true; break; }
+                        }
+                        return hasTb && !hasDone;
+                    })()`,
+                    returnByValue: true,
+                }).catch(() => null);
+                if (galleryReady?.result?.value) {
+                    console.log('[Komfy Video] ✅ Gallery view confirmed after', gw * 500, 'ms');
+                    break;
+                }
+                await sleep(500);
+            }
+            await sleep(500);
+        }
+
         // Wait for bottom bar
         let detectedBarType = null;
         for (let w = 0; w < 10; w++) {
@@ -232,11 +374,8 @@ async function generateViaUI(
             await sleep(500);
         }
 
-        // ★ Bottom bar showing image model (Banana/Imagen) does NOT mean detail view.
-        //   After an image gen task, the gallery still shows Banana as last selected model.
-        //   runSettingsPhase() will switch to Video mode via popover — NO navigation needed.
-        //   CRITICAL: history.back() or URL navigation here would RELOAD the page
-        //   and KILL all concurrent image gen polls that are still running.
+        // After exiting detail view, bottom bar may still show image model.
+        // runSettingsPhase() will switch to Video mode via popover.
         if (detectedBarType === 'image-model') {
             console.log('[Komfy Video] Bottom bar shows image model — will switch to Video via popover (no navigation needed).');
         }
@@ -739,13 +878,34 @@ async function generateViaUI(
         });
         await sleep(200);
 
-        // Clear + type prompt
-        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2 });
-        await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'a', code: 'KeyA', modifiers: 2 });
-        await sleep(100);
-        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' });
-        await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Backspace', code: 'Backspace' });
-        await sleep(100);
+        // Clear text + type prompt
+        // ★ Khi co ingredient images: KHONG dung Ctrl+A + Backspace (se xoa ca images!)
+        // Thay vao do: dung JS xoa text nodes, giu lai image elements
+        if (expectedImageCount > 0) {
+            await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var tb = document.querySelector('[role="textbox"],[contenteditable="true"]');
+                    if (!tb) return 'no-textbox';
+                    // Di chuyen cursor ve cuoi textbox (sau images)
+                    var sel = window.getSelection();
+                    var range = document.createRange();
+                    range.selectNodeContents(tb);
+                    range.collapse(false); // collapse to end
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    return 'cursor-at-end';
+                })()`,
+                returnByValue: true,
+            });
+            await sleep(100);
+        } else {
+            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2 });
+            await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'a', code: 'KeyA', modifiers: 2 });
+            await sleep(100);
+            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' });
+            await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Backspace', code: 'Backspace' });
+            await sleep(100);
+        }
         await send('Input.insertText', { text: prompt });
         await sleep(500);
         console.log('[Komfy Video] [STEP 3] Typed prompt:', prompt.substring(0, 40),
@@ -923,6 +1083,8 @@ async function generateViaUI(
                     for (var j = 0; j < allClickable.length; j++) {
                         var r0j = allClickable[j].getBoundingClientRect();
                         if (r0j.width === 0 || r0j.height === 0) continue;
+                        // ★ Gioi han height: submit button nho, gallery thumbnail lon
+                        if (r0j.height > 80) continue;
                         if (Math.abs(r0j.top + r0j.height/2 - addCY) > yTol) continue;
                         if (r0j.left <= addBtnR.right) continue;
                         var t0j = (allClickable[j].textContent || '').trim();
@@ -936,7 +1098,7 @@ async function generateViaUI(
                 for (var i = 0; i < allClickable.length; i++) {
                     var text = (allClickable[i].textContent || '').trim();
                     var r = allClickable[i].getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0 || r.top < window.innerHeight * 0.3) continue;
+                    if (r.width === 0 || r.height === 0 || r.height > 80 || r.top < window.innerHeight * 0.3) continue;
                     if (isExcluded(text)) continue;
                     if (text.includes('arrow_forward') || text.includes('send') || text.includes('chevron_right') || text === '>') {
                         return { found: true, method: 'submit-icon', text: text.substring(0,30), ...getCenter(r) };
@@ -948,18 +1110,20 @@ async function generateViaUI(
                     var label = (allClickable[i].getAttribute('aria-label')||'').toLowerCase();
                     var text = (allClickable[i].textContent||'').trim();
                     var r = allClickable[i].getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0 || r.top < window.innerHeight * 0.3) continue;
+                    if (r.width === 0 || r.height === 0 || r.height > 80 || r.top < window.innerHeight * 0.3) continue;
                     if (isExcluded(text)) continue;
                     if (label.includes('create')||label.includes('send')||label.includes('generate')||label.includes('submit')) {
                         return { found: true, method: 'aria-label', text: text.substring(0,30), label, ...getCenter(r) };
                     }
                 }
 
-                // Step 3: Rightmost in bottom 70%
+                // Step 3: Rightmost in bottom bar area (height < 80 de tranh gallery thumbnail)
                 var best = null, bestX = -Infinity;
                 for (var j = 0; j < allClickable.length; j++) {
                     var r = allClickable[j].getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0 || r.top < window.innerHeight * 0.3) continue;
+                    if (r.width === 0 || r.height === 0 || r.height > 80 || r.top < window.innerHeight * 0.3) continue;
+                    // ★ Chi xet button o bottom bar (120px cuoi viewport)
+                    if (r.bottom < window.innerHeight - 120) continue;
                     var text = (allClickable[j].textContent||'').trim();
                     if (isExcluded(text)) continue;
                     if (r.left > bestX) { bestX = r.left; best = { r, text: text.substring(0,20) }; }

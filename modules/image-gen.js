@@ -67,6 +67,45 @@ async function waitForUploadsComplete(send, expectedCount, maxWaitMs = 30000) {
                 var imgCount = imgNodeSet.size;
                 var imgDetails = [];
 
+                // 5. Check if ingredient images are still processing
+                // (diagonal stripe overlay, grey/dim, opacity < 1, mask, etc.)
+                var hasProcessingImages = false;
+                imgNodeSet.forEach(function(img) {
+                    // Walk up 3 levels checking opacity, overlays, masks
+                    var el = img;
+                    for (var lvl = 0; lvl < 4 && el; lvl++) {
+                        var cs = window.getComputedStyle(el);
+                        // Check reduced opacity (processing indicator)
+                        if (parseFloat(cs.opacity) < 0.95 && lvl > 0) { hasProcessingImages = true; }
+                        // Check background with gradient stripes (diagonal pattern)
+                        var bg = cs.backgroundImage || '';
+                        if (bg.includes('repeating-linear-gradient') || bg.includes('stripe')) { hasProcessingImages = true; }
+                        // Check filter (greyscale, blur = processing)
+                        var filter = cs.filter || '';
+                        if (filter !== 'none' && filter !== '' && (filter.includes('grayscale') || filter.includes('blur'))) { hasProcessingImages = true; }
+                        el = el.parentElement;
+                    }
+                    // Check siblings for overlay/mask elements
+                    var container = img.parentElement;
+                    if (container) {
+                        var siblings = container.children;
+                        for (var s = 0; s < siblings.length; s++) {
+                            if (siblings[s] === img) continue;
+                            var sr = siblings[s].getBoundingClientRect();
+                            var ir = img.getBoundingClientRect();
+                            // Overlay: element covering the image area
+                            if (sr.width > 10 && sr.height > 10 &&
+                                Math.abs(sr.left - ir.left) < 10 && Math.abs(sr.top - ir.top) < 10) {
+                                var scs = window.getComputedStyle(siblings[s]);
+                                var pos = scs.position;
+                                if (pos === 'absolute' || pos === 'fixed') { hasProcessingImages = true; }
+                                var sbg = scs.backgroundImage || '';
+                                if (sbg.includes('gradient') || sbg.includes('stripe')) { hasProcessingImages = true; }
+                            }
+                        }
+                    }
+                });
+
                 // 4. Check submit button disabled state
                 var btns = document.querySelectorAll('button, div[role="button"]');
                 var submitDisabled = false;
@@ -95,6 +134,7 @@ async function waitForUploadsComplete(send, expectedCount, maxWaitMs = 30000) {
                 
                 return {
                     hasLoading: hasLoading,
+                    hasProcessingImages: hasProcessingImages,
                     imgCount: imgCount,
                     submitDisabled: submitDisabled,
                     submitFound: submitFound,
@@ -121,6 +161,7 @@ async function waitForUploadsComplete(send, expectedCount, maxWaitMs = 30000) {
         // - Must have >= expectedCount images (khong cho phep 0 khi expected > 0)
         const hasEnoughImages = s.imgCount >= expectedCount && (expectedCount === 0 || s.imgCount > 0);
         const isReady = !s.hasLoading &&
+            !s.hasProcessingImages &&
             (!s.submitDisabled || !s.submitFound) &&
             hasEnoughImages;
 
@@ -181,15 +222,14 @@ async function generateImageViaUI(prompt, aspectRatio, imageType, modelName, pro
     await prevCdpTail;
     console.log('[Komfy] [CDP-Mutex] ✅ CDP session lock acquired.');
 
-    const tab = await ensureFlowTab(true, projectName);
+    const tab = await ensureFlowTab(false, projectName);
     const tabId = tab.id;
     console.log('[Komfy] Image CDP tab:', tabId, 'aspect:', aspectRatio, 'model:', modelName, 'images:', imageInputs.length, 'prompt:', prompt.substring(0, 40));
 
-    // Focus Chrome window + tab truoc khi bat dau automation
-    // Electron co the da steal focus → can re-focus Chrome
+    // Activate tab within window (CDP needs active tab for mouse/keyboard events)
+    // Do NOT focus the Chrome window — avoid stealing OS focus from user
     await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-    await new Promise(r => setTimeout(r, 500)); // cho focus settle
+    await new Promise(r => setTimeout(r, 500)); // cho tab settle
 
     await chrome.debugger.attach({ tabId }, '1.3');
 
@@ -249,8 +289,8 @@ async function generateImageViaUI(prompt, aspectRatio, imageType, modelName, pro
                     for (var i = 0; i < btns.length; i++) {
                         var text = (btns[i].textContent || '').toLowerCase().trim();
                         var r = btns[i].getBoundingClientRect();
-                        // Bottom bar: gan day trang, du rong, chua ten model
-                        if (r.bottom > window.innerHeight - 120 && r.width > 50 && r.height > 0 &&
+                        // Bottom bar: gan day trang, du rong, chua ten model, cao < 80px (tranh gallery thumbnail)
+                        if (r.bottom > window.innerHeight - 120 && r.width > 50 && r.height > 0 && r.height < 80 &&
                             (text.includes('banana') || text.includes('imagen') || text.includes('gemini') ||
                              text.includes('veo') || text.includes('video') || /x[1-4]/.test(text))) {
                             return {
@@ -262,11 +302,11 @@ async function generateImageViaUI(prompt, aspectRatio, imageType, modelName, pro
                             };
                         }
                     }
-                    // Fallback: tim bat ky button nao o bottom bar
+                    // Fallback: tim bat ky button nao o bottom bar (height < 80 de tranh gallery thumbnail)
                     var fallback = [];
                     for (var i = 0; i < btns.length; i++) {
                         var r = btns[i].getBoundingClientRect();
-                        if (r.bottom > window.innerHeight - 120 && r.width > 50 && r.height > 0) {
+                        if (r.bottom > window.innerHeight - 120 && r.width > 50 && r.height > 0 && r.height < 80) {
                             fallback.push({ text: (btns[i].textContent || '').trim().substring(0, 40), w: Math.round(r.width), bottom: Math.round(r.bottom) });
                         }
                     }
@@ -560,7 +600,7 @@ async function generateImageViaUI(prompt, aspectRatio, imageType, modelName, pro
                             for (var i = 0; i < btns.length; i++) {
                                 var text = (btns[i].textContent || '').toLowerCase().trim();
                                 var r = btns[i].getBoundingClientRect();
-                                if (r.bottom > window.innerHeight - 120 && r.width > 50 && r.height > 0 &&
+                                if (r.bottom > window.innerHeight - 120 && r.width > 50 && r.height > 0 && r.height < 80 &&
                                     (text.includes('banana') || text.includes('imagen') || text.includes('gemini') ||
                                      text.includes('veo') || /x[1-4]/.test(text))) {
                                     return { found: true, x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), text: text.substring(0, 40) };
@@ -1514,7 +1554,34 @@ async function generateImageViaUI(prompt, aspectRatio, imageType, modelName, pro
             };
         }
 
-        console.warn('[Komfy] Page download failed:', dlData?.error || 'unknown');
+        // ★ Page context CORS fail → try service worker fetch (bypass CORS)
+        console.warn('[Komfy] Page download failed:', dlData?.error, '→ trying service worker fetch...');
+        try {
+            const swRes = await fetch(imageUrl, { credentials: 'include', redirect: 'follow' });
+            if (swRes.ok) {
+                const buf = await swRes.arrayBuffer();
+                const u8 = new Uint8Array(buf);
+                let b64 = ''; const C = 8192;
+                for (let i = 0; i < u8.length; i += C) b64 += String.fromCharCode.apply(null, u8.subarray(i, i + C));
+                const mimeType = swRes.headers.get('content-type') || 'image/png';
+                console.log('[Komfy] ✅ Image downloaded via service worker!', (buf.byteLength / 1024).toFixed(1), 'KB');
+                return {
+                    ok: true,
+                    status: 200,
+                    body: JSON.stringify({
+                        base64: btoa(b64),
+                        mimeType: mimeType,
+                        size: buf.byteLength,
+                        imageUrl: imageUrl,
+                    })
+                };
+            }
+            console.warn('[Komfy] SW fetch also failed:', swRes.status);
+        } catch (swErr) {
+            console.warn('[Komfy] SW fetch error:', swErr.message);
+        }
+
+        // Last resort: return imageUrl only (client can try to display directly)
         return {
             ok: true,
             status: 200,
