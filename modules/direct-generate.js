@@ -287,7 +287,36 @@ async function directGenerateImage(task) {
 
     if (!response.ok) {
         console.warn('[Komfy Direct] Image API failed:', response.status, '| error:', response.error, '| body:', response.body?.substring(0, 500));
-        throw new Error('DIRECT_API_FAILED:' + response.status + ':' + (response.error || response.body?.substring(0, 100) || 'unknown'));
+
+        // ★ 404/400 with referenceMediaIds = stale mediaIds → retry with raw imageInputs
+        const rawImageInputs = body.imageInputs || [];
+        if ((response.status === 404 || response.status === 400) && referenceMediaIds.length > 0 && rawImageInputs.length > 0) {
+            console.log('[Komfy Direct] Stale mediaIds detected. Retrying image gen WITHOUT mediaIds (UI fallback will handle refs)...');
+            // Remove stale imageInputs (mediaId-based) from request
+            delete requestItem.imageInputs;
+            // Fresh reCAPTCHA
+            try {
+                const freshToken = await getFreshRecaptchaToken(tab.id, 'image_generation');
+                if (freshToken) {
+                    apiBody.clientContext.recaptchaContext.token = freshToken;
+                    requestItem.clientContext.recaptchaContext.token = freshToken;
+                }
+            } catch (rcErr) {}
+            const retryBodyStr = JSON.stringify(apiBody);
+            await humanDelay(500, 1500);
+            const retryRes = await callApiFromPage(tab.id, url, retryBodyStr, headers);
+            if (retryRes.ok) {
+                console.log('[Komfy Direct] ✅ Image retry (no refs) success!');
+                response.ok = true;
+                response.body = retryRes.body;
+                response.status = retryRes.status;
+            } else {
+                // Let it fall through to UI automation
+                throw new Error('DIRECT_API_FAILED:' + retryRes.status + ':retry-' + (retryRes.body?.substring(0, 80) || 'failed'));
+            }
+        } else {
+            throw new Error('DIRECT_API_FAILED:' + response.status + ':' + (response.error || response.body?.substring(0, 100) || 'unknown'));
+        }
     }
 
     const data = JSON.parse(response.body);
@@ -505,18 +534,10 @@ async function directGenerateVideo(task) {
         console.warn('[Komfy Direct] Video API failed:', response.status, '| error:', response.error, '| body:', response.body?.substring(0, 500));
 
         // ★ 404 with referenceMediaIds = stale mediaIds from different project
-        // Retry WITHOUT mediaIds → use T2V endpoint (text-only, no ingredients)
+        // Retry WITH raw imageBytes (if available) or WITHOUT images
         if (response.status === 404 && referenceMediaIds.length > 0) {
-            console.log('[Komfy Direct] 404 likely caused by stale mediaIds from different project. Retrying without mediaIds...');
-            // Strip referenceImages and revert endpoint/model
-            delete apiBody.requests[0].referenceImages;
-            const origEndpoint = endpoint; // original T2V endpoint
-            const origUrl = FLOW_API_BASE + origEndpoint;
-            // Revert model key: r2v → t2v, remove _ultra
-            if (apiBody.requests[0].videoModelKey) {
-                let mk = apiBody.requests[0].videoModelKey.replace('r2v', 't2v').replace('_ultra', '');
-                apiBody.requests[0].videoModelKey = mk;
-            }
+            console.log('[Komfy Direct] 404 likely caused by stale mediaIds. Retrying with raw imageBytes...');
+
             // Fresh reCAPTCHA token for retry (old one consumed by 404 request)
             try {
                 const freshToken = await getFreshRecaptchaToken(tab.id, 'video_generation');
@@ -527,20 +548,48 @@ async function directGenerateVideo(task) {
             } catch (rcErr) {
                 console.warn('[Komfy Direct] Could not refresh reCAPTCHA for retry:', rcErr.message?.substring(0, 60));
             }
+
+            let retryEndpoint, retryUrl;
+            if (ingredientImages.length > 0) {
+                // ★ Retry with raw imageBytes — preserves ingredient references
+                apiBody.requests[0].referenceImages = [];
+                for (const imgDataUrl of ingredientImages) {
+                    if (!imgDataUrl || !imgDataUrl.startsWith('data:')) continue;
+                    const b64 = imgDataUrl.split(',')[1];
+                    const mimeMatch = imgDataUrl.match(/^data:([^;]+);/);
+                    const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+                    apiBody.requests[0].referenceImages.push({
+                        imageBytes: b64,
+                        mimeType: mime,
+                        imageUsageType: 'IMAGE_USAGE_TYPE_ASSET',
+                    });
+                }
+                // Keep r2v endpoint + model for reference images
+                retryEndpoint = '/video:batchAsyncGenerateVideoReferenceImages';
+                retryUrl = FLOW_API_BASE + retryEndpoint;
+                console.log('[Komfy Direct] Retrying R2V with', apiBody.requests[0].referenceImages.length, 'raw images (inline base64)');
+            } else {
+                // No raw images available → fallback to T2V text-only
+                delete apiBody.requests[0].referenceImages;
+                retryEndpoint = endpoint; // original T2V endpoint
+                retryUrl = FLOW_API_BASE + retryEndpoint;
+                if (apiBody.requests[0].videoModelKey) {
+                    let mk = apiBody.requests[0].videoModelKey.replace('r2v', 't2v').replace('_ultra', '');
+                    apiBody.requests[0].videoModelKey = mk;
+                }
+                console.log('[Komfy Direct] No raw images available, retrying as T2V (no refs)');
+            }
+
             const retryBodyStr = JSON.stringify(apiBody);
-            console.log('[Komfy Direct] Retrying as T2V (no refs):', origEndpoint, '| model:', apiBody.requests[0].videoModelKey);
             await humanDelay(1000, 2500);
-            const retryRes = await callApiFromPage(tab.id, origUrl, retryBodyStr, headers);
+            const retryRes = await callApiFromPage(tab.id, retryUrl, retryBodyStr, headers);
             if (retryRes.ok) {
-                console.log('[Komfy Direct] ✅ Retry T2V success!');
-                // Continue with retry response
+                console.log('[Komfy Direct] ✅ Retry success!');
                 const retryData = JSON.parse(retryRes.body);
                 const retryMediaId = retryData?.operations?.[0]?.operation?.name
                     || retryData?.operations?.[0]?.name
                     || retryData?.media?.[0]?.name;
                 if (retryMediaId) {
-                    // Fall through to polling below with retryMediaId
-                    // We need to reassign and skip the original parse
                     response.ok = true;
                     response.body = retryRes.body;
                 } else {
