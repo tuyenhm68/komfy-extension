@@ -8,6 +8,11 @@ window.addEventListener('message', (event) => {
         try { chrome.runtime.sendMessage({ action: 'UPDATE_XBV', xbv: event.data.xbv, projectId: event.data.projectId }); } catch(e) {}
     }
 
+    // ★ Bearer token captured from fetch interceptor
+    if (event.data.type === 'KOMFY_TOKEN_CAPTURED') {
+        try { chrome.runtime.sendMessage({ action: 'TOKEN_CAPTURED', token: event.data.token, projectId: event.data.projectId }); } catch(e) {}
+    }
+
     // State (projectId)
     if (event.data.type === 'KOMFY_STATE') {
         try { chrome.runtime.sendMessage({ action: 'UPDATE_STATE', projectId: event.data.projectId }); } catch(e) {}

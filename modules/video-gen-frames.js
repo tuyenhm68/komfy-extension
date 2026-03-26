@@ -7,14 +7,18 @@
 // ============================================================
 
 /**
- * Upload anh cho First Frame (start) / Last Frame (end) slot.
- * Flow thuc te:
- *   1. Click "Start"/"End" button → page gallery hien ra
- *   2. Inject file data vao input[type="file"] (hoac click "Upload image")
- *   3. Poll thumbnail moi → click de confirm slot
+ * Chon anh cho First Frame (start) / Last Frame (end) slot.
+ *
+ * FLOW:
+ *   1. Click "Start"/"End" slot → Asset Picker panel mo ra (sidebar)
+ *   2. Chon anh RECENTLY UPLOADED (dau tien) trong picker
+ *   3. Verify slot da duoc gan anh (thumbnail hien)
+ *
+ * Dieu kien: Anh DA DUOC UPLOAD len project truoc do (qua UPLOAD_IMAGE API).
+ * Asset Picker hien danh sach tat ca anh trong project, sort "Recent" → anh moi upload o dau.
  *
  * @param {string} slotType - 'start' | 'end'
- * @param {string} imageDataUrl - data:image/xxx;base64,...
+ * @param {string} imageDataUrl - data:image/xxx;base64,... (backup, ko dung de upload)
  * @param {Function} send - CDP sendCommand wrapper
  * @param {Function} sleep - Promise sleep
  * @returns {boolean}
@@ -22,75 +26,98 @@
 async function selectFrameFromPicker(slotType, imageDataUrl, send, sleep) {
     console.log('[Komfy Video] selectFrameFromPicker:', slotType);
 
-    if (!imageDataUrl || !imageDataUrl.startsWith('data:')) {
-        console.warn('[Komfy Video] invalid imageDataUrl for', slotType);
-        return false;
-    }
-
-    const imgBase64 = imageDataUrl.split(',')[1];
-    const mimeMatch = imageDataUrl.match(/^data:([^;]+);/);
-    const imgMime = mimeMatch ? mimeMatch[1] : 'image/png';
-    const imgExt = imgMime.split('/')[1] || 'png';
-
-    // B1: Click "Start" hoac "End" button → gallery hien ra
+    // =========================================================
+    // B1: Click "Start"/"End" slot → Asset Picker panel mo ra
+    // =========================================================
+    // LUON dung CDP mouse events — JS .click() khong trigger React event handlers
+    // dung cach (dac biet sau khi DOM thay doi do fill slot truoc do).
     let slotClicked = false;
     for (let attempt = 0; attempt < 8 && !slotClicked; attempt++) {
-        const jsResult = await send('Runtime.evaluate', {
+        // Tim toa do slot qua JS, click qua CDP
+        const coordR = await send('Runtime.evaluate', {
             expression: `(function(){
                 var isStart = '${slotType}' === 'start';
-                var targetText = isStart ? 'start' : 'end';
-                var allEls = [...document.querySelectorAll('button,[role="button"],div[tabindex],span[tabindex]')];
-                for (var i = 0; i < allEls.length; i++) {
-                    var el = allEls[i];
-                    var r = el.getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0 || r.height > 120 || r.top < window.innerHeight * 0.5) continue;
-                    var t = (el.textContent || '').trim().toLowerCase();
-                    var lbl = (el.getAttribute('aria-label') || '').toLowerCase();
-                    if (t === targetText || lbl === targetText || lbl.includes(isStart ? 'first' : 'last')) {
-                        el.click();
-                        return 'js:' + t + '@' + Math.round(r.x) + ',' + Math.round(r.y);
+                var targetText = isStart ? 'Start' : 'End';
+
+                // Strategy 1: Swap button anchor → sibling container
+                var swapBtn = document.querySelector('button[aria-label="Swap first and last frames"]');
+                if (swapBtn && swapBtn.parentElement) {
+                    var children = swapBtn.parentElement.children;
+                    for (var i = 0; i < children.length; i++) {
+                        var ch = children[i];
+                        var t = (ch.textContent||'').trim();
+                        if (t === targetText) {
+                            var r = ch.getBoundingClientRect();
+                            if (r.width > 0) {
+                                return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2), via: 'swap-anchor:'+t };
+                            }
+                        }
+                    }
+                    // Slot da co anh (khong co text "Start"/"End" nua)?
+                    // Start = first non-swap child, End = last non-swap child
+                    var nonSwap = [];
+                    for (var i = 0; i < children.length; i++) {
+                        if (children[i] !== swapBtn) nonSwap.push(children[i]);
+                    }
+                    var slotEl = isStart ? nonSwap[0] : nonSwap[nonSwap.length - 1];
+                    if (slotEl) {
+                        var sr = slotEl.getBoundingClientRect();
+                        if (sr.width > 0) {
+                            return { x: Math.round(sr.x+sr.width/2), y: Math.round(sr.y+sr.height/2), via: 'swap-positional:'+slotEl.tagName };
+                        }
                     }
                 }
-                var dbg = allEls
-                    .filter(function(el){ var r = el.getBoundingClientRect(); return r.width > 0 && r.top > window.innerHeight * 0.5; })
-                    .map(function(el){ var r = el.getBoundingClientRect(); return (el.textContent||'').trim().substring(0,12) + '@' + Math.round(r.x) + ',' + Math.round(r.y); })
+
+                // Strategy 2: Leaf div with text "Start"/"End"
+                var allDivs = [...document.querySelectorAll('div')];
+                for (var j = 0; j < allDivs.length; j++) {
+                    var div = allDivs[j];
+                    var dt = (div.textContent||'').trim();
+                    if (dt !== targetText || div.children.length > 0) continue;
+                    var dr = div.getBoundingClientRect();
+                    if (dr.width === 0 || dr.width > 100 || dr.top < window.innerHeight * 0.4) continue;
+                    // Walk up to find closest clickable ancestor (button, [role=button], add_circle_outline)
+                    var clickTarget = div;
+                    for (var up = 0; up < 6; up++) {
+                        var p = clickTarget.parentElement;
+                        if (!p) break;
+                        var pTag = p.tagName.toLowerCase();
+                        if (pTag === 'button' || p.getAttribute('role') === 'button' || p.getAttribute('tabindex') !== null) {
+                            clickTarget = p;
+                            break;
+                        }
+                        var pr = p.getBoundingClientRect();
+                        // Stop if parent is too large (probably a container, not a slot)
+                        if (pr.width > 300 || pr.height > 300) break;
+                        clickTarget = p;
+                    }
+                    var cr = clickTarget.getBoundingClientRect();
+                    return { x: Math.round(cr.x+cr.width/2), y: Math.round(cr.y+cr.height/2), via: 'div-text:'+dt+'@'+Math.round(dr.x)+','+Math.round(dr.y)+' click:'+clickTarget.tagName+'@'+Math.round(cr.x)+','+Math.round(cr.y)+' size:'+Math.round(cr.width)+'x'+Math.round(cr.height) };
+                }
+
+                // Debug info
+                var dbg = [...document.querySelectorAll('button,[role="button"],div')]
+                    .filter(function(el){ var r = el.getBoundingClientRect(); return r.width > 20 && r.width < 200 && r.top > window.innerHeight * 0.4 && el.children.length <= 2; })
+                    .map(function(el){ var r = el.getBoundingClientRect(); return el.tagName + ':' + (el.textContent||'').trim().substring(0,15) + '@' + Math.round(r.x) + ',' + Math.round(r.y); })
                     .slice(0, 10);
-                return 'not-found:' + dbg.join('|');
+                return { x: 0, y: 0, via: 'not-found:' + dbg.join('|') };
             })()`,
             returnByValue: true,
         });
-        const jsVia = jsResult?.result?.value || '';
-        console.log('[Komfy Video] B1 attempt', attempt, ':', jsVia.substring(0, 100));
+        const coord = coordR?.result?.value;
+        console.log('[Komfy Video] B1 attempt', attempt, ':', coord?.via?.substring(0, 100), '| x:', coord?.x, 'y:', coord?.y);
 
-        if (jsVia && !jsVia.startsWith('not-found')) {
+        if (coord?.x > 0 && coord?.y > 0) {
+            // LUON dung CDP mouse events — co PointerEvent pipeline day du
+            await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: coord.x, y: coord.y });
+            await sleep(100);
+            await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: coord.x, y: coord.y, button: 'left', clickCount: 1 });
+            await sleep(80);
+            await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: coord.x, y: coord.y, button: 'left', clickCount: 1 });
             slotClicked = true;
+            console.log('[Komfy Video] B1 CDP click:', coord.x, coord.y);
         } else {
-            const coordR = await send('Runtime.evaluate', {
-                expression: `(function(){
-                    var isStart = '${slotType}' === 'start';
-                    var targetText = isStart ? 'start' : 'end';
-                    var allEls = [...document.querySelectorAll('button,[role="button"],div[tabindex]')];
-                    for (var i = 0; i < allEls.length; i++) {
-                        var el = allEls[i];
-                        var r = el.getBoundingClientRect();
-                        if (r.width === 0 || r.height > 120 || r.top < window.innerHeight * 0.5) continue;
-                        var t = (el.textContent||'').trim().toLowerCase();
-                        if (t === targetText) return { x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2) };
-                    }
-                    return null;
-                })()`,
-                returnByValue: true,
-            });
-            const coord = coordR?.result?.value;
-            if (coord?.x) {
-                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: coord.x, y: coord.y, button: 'left', clickCount: 1 });
-                await sleep(60);
-                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: coord.x, y: coord.y, button: 'left', clickCount: 1 });
-                slotClicked = true;
-                console.log('[Komfy Video] B1 CDP click:', coord.x, coord.y);
-            } else {
-                await sleep(500);
-            }
+            await sleep(500);
         }
     }
 
@@ -99,155 +126,249 @@ async function selectFrameFromPicker(slotType, imageDataUrl, send, sleep) {
         return false;
     }
 
-    await sleep(1500); // Cho gallery hien ra
+    // =========================================================
+    // B2: Cho Asset Picker mo ra → click anh dau tien (most recent)
+    // =========================================================
+    // Asset Picker la mot panel/sidebar hien danh sach anh trong project.
+    // Anh da upload (qua UPLOAD_IMAGE API) se xuat hien o dau neu sort "Recent".
+    // Cau truc: panel co nhieu row, moi row co thumbnail (img) + ten.
+    // Ta click vao row dau tien (anh moi nhat) de gan vao slot.
+    console.log('[Komfy Video] B2: Waiting for Asset Picker...');
+    await sleep(2000);
 
-    // B2: Inject file data vao file input
-    const injectResult = await send('Runtime.evaluate', {
-        expression: `(async function(){
-            try {
-                var base64 = ${JSON.stringify(imgBase64)};
-                var mime = ${JSON.stringify(imgMime)};
-                var fileName = 'frame_${slotType}.${imgExt}';
-                var byteChars = atob(base64);
-                var arr = new Uint8Array(byteChars.length);
-                for (var i = 0; i < byteChars.length; i++) arr[i] = byteChars.charCodeAt(i);
-                var blob = new Blob([arr], {type: mime});
-                var file = new File([blob], fileName, {type: mime, lastModified: Date.now()});
-                var dt = new DataTransfer();
-                dt.items.add(file);
-
-                var inputs = [...document.querySelectorAll('input[type="file"]')];
-                if (inputs.length === 0) return 'no-file-input';
-
-                var imgInput = inputs.find(function(inp){ return (inp.accept||'').includes('image'); }) || inputs[0];
-                try {
-                    Object.defineProperty(imgInput, 'files', { value: dt.files, configurable: true, writable: true });
-                    imgInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    imgInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
-                    return 'file-injected:' + fileName + ' (' + byteChars.length + 'b)';
-                } catch(e2) {
-                    return 'inject-err:' + e2.message;
-                }
-            } catch(e) { return 'error:' + e.message; }
-        })()`,
-        returnByValue: true,
-        awaitPromise: true,
-    });
-    console.log('[Komfy Video] B2 inject:', injectResult?.result?.value);
-
-    // B3: Neu file inject fail, thu click "Upload image" button
-    const injectVal = injectResult?.result?.value || '';
-    if (injectVal.startsWith('no-file-input') || injectVal.startsWith('inject-err')) {
-        console.log('[Komfy Video] B3: Tim nut Upload image...');
-        const uploadBtnResult = await send('Runtime.evaluate', {
+    let pickerImageClicked = false;
+    for (let poll = 0; poll < 15 && !pickerImageClicked; poll++) {
+        // Tim anh trong picker — TRA VE TOA DO de click qua CDP
+        const pickerResult = await send('Runtime.evaluate', {
             expression: `(function(){
-                var btns = [...document.querySelectorAll('button,[role="button"]')];
-                for (var i = 0; i < btns.length; i++) {
-                    var t = (btns[i].textContent||btns[i].getAttribute('aria-label')||'').toLowerCase();
-                    var r = btns[i].getBoundingClientRect();
-                    if (r.width === 0) continue;
-                    if (t.includes('upload')) {
-                        btns[i].click();
-                        return 'upload-btn:' + t.substring(0,30) + '@' + Math.round(r.x) + ',' + Math.round(r.y);
-                    }
-                }
-                return 'no-upload-btn';
-            })()`,
-            returnByValue: true,
-        });
-        console.log('[Komfy Video] B3 upload btn:', uploadBtnResult?.result?.value);
-        await sleep(800);
-
-        // Retry inject sau khi click upload
-        const retryInject = await send('Runtime.evaluate', {
-            expression: `(async function(){
-                var base64 = ${JSON.stringify(imgBase64)};
-                var mime = ${JSON.stringify(imgMime)};
-                var file = new File([Uint8Array.from(atob(base64), c=>c.charCodeAt(0))], 'frame_${slotType}.${imgExt}', {type:mime, lastModified:Date.now()});
-                var dt = new DataTransfer(); dt.items.add(file);
-                var inputs = [...document.querySelectorAll('input[type="file"]')];
-                if (!inputs.length) return 'still-no-input';
-                var inp = inputs.find(function(i){ return (i.accept||'').includes('image'); }) || inputs[0];
-                try {
-                    Object.defineProperty(inp, 'files', { value: dt.files, configurable: true, writable: true });
-                    inp.dispatchEvent(new Event('change', {bubbles:true}));
-                    return 'retry-ok';
-                } catch(e) { return 'retry-err:' + e.message; }
-            })()`,
-            returnByValue: true,
-            awaitPromise: true,
-        });
-        console.log('[Komfy Video] B3 retry inject:', retryInject?.result?.value);
-    }
-
-    // B4: Poll cho thumbnail moi → click de confirm slot
-    console.log('[Komfy Video] B4 Cho upload...');
-    await sleep(3000);
-
-    let newThumbClicked = false;
-    for (let poll = 0; poll < 12 && !newThumbClicked; poll++) {
-        const thumbResult = await send('Runtime.evaluate', {
-            expression: `(function(){
+                // Tim tat ca <img> visible (picker, gallery, overlay)
                 var allImgs = [...document.querySelectorAll('img')].filter(function(img){
                     var r = img.getBoundingClientRect();
-                    return r.width >= 40 && r.height >= 40 && r.top < window.innerHeight * 0.7 && r.top > 60;
+                    return r.width >= 30 && r.height >= 30
+                        && r.top > 50 && r.top < window.innerHeight * 0.85
+                        && r.left > 50;
                 });
-                if (allImgs.length === 0) return 'no-img:count=0';
-                var target = allImgs[0];
-                var el = target;
-                for (var i = 0; i < 5; i++) {
+
+                if (allImgs.length === 0) {
+                    // Debug: dialogs, panels, radix poppers
+                    var panels = [...document.querySelectorAll('[role="dialog"],[role="listbox"],[class*="picker"],[class*="gallery"],[class*="asset"],[data-radix-popper-content-wrapper]')]
+                        .filter(function(p){ return p.getBoundingClientRect().width > 0; });
+                    var searchInput = document.querySelector('input[placeholder*="Search"]');
+                    // Also log any buttons that appeared (could be upload/browse button)
+                    var newBtns = [...document.querySelectorAll('button')].filter(function(b){
+                        var r = b.getBoundingClientRect();
+                        return r.width > 30 && r.top > 50 && r.top < window.innerHeight * 0.7;
+                    }).map(function(b){
+                        return (b.textContent||'').trim().substring(0,20) + '@' + Math.round(b.getBoundingClientRect().x) + ',' + Math.round(b.getBoundingClientRect().y);
+                    }).slice(0, 5);
+                    return { found: false, panels: panels.length, search: !!searchInput, btns: newBtns };
+                }
+
+                // Return coordinates of first image (most recent upload)
+                var img = allImgs[0];
+                var r = img.getBoundingClientRect();
+
+                // Tim parent clickable de lay toa do chinh xac hon
+                var el = img;
+                for (var p = 0; p < 8; p++) {
                     if (!el.parentElement) break;
                     el = el.parentElement;
                     var tag = el.tagName.toLowerCase();
-                    if (tag === 'button' || el.getAttribute('role') === 'button' || el.getAttribute('tabindex') === '0') break;
+                    if (tag === 'button' || el.getAttribute('role') === 'button'
+                        || el.getAttribute('role') === 'listitem' || el.getAttribute('role') === 'option'
+                        || el.getAttribute('tabindex') === '0' || el.getAttribute('tabindex') === '-1') break;
+                    if (tag === 'div' && el.children.length >= 1 && el.children.length <= 5) {
+                        var elR = el.getBoundingClientRect();
+                        if (elR.width > 60 && elR.height > 30 && elR.height < 200) break;
+                    }
                 }
-                el.click();
-                var r = target.getBoundingClientRect();
-                return 'clicked-img:src=' + (target.src||'').slice(-30) + '@' + Math.round(r.x) + ',' + Math.round(r.y);
+                var clickR = el.getBoundingClientRect();
+
+                return {
+                    found: true,
+                    x: Math.round(clickR.x + clickR.width/2),
+                    y: Math.round(clickR.y + clickR.height/2),
+                    src: (img.src||'').slice(-40),
+                    imgCount: allImgs.length,
+                    el: el.tagName + '[' + (el.className||'').substring(0,30) + ']'
+                };
             })()`,
             returnByValue: true,
         });
-        const thumbVal = thumbResult?.result?.value || '';
-        console.log('[Komfy Video] B4 poll', poll, ':', thumbVal.substring(0, 80));
-        if (thumbVal.startsWith('clicked-img')) {
-            newThumbClicked = true;
+        const pickerVal = pickerResult?.result?.value;
+        console.log('[Komfy Video] B2 poll', poll, ':', JSON.stringify(pickerVal)?.substring(0, 150));
+
+        if (pickerVal?.found && pickerVal.x > 0) {
+            // Click qua CDP — khong dung JS .click()
+            await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pickerVal.x, y: pickerVal.y });
+            await sleep(100);
+            await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pickerVal.x, y: pickerVal.y, button: 'left', clickCount: 1 });
+            await sleep(80);
+            await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pickerVal.x, y: pickerVal.y, button: 'left', clickCount: 1 });
+            console.log('[Komfy Video] B2 CDP click picker image:', pickerVal.x, pickerVal.y);
+            pickerImageClicked = true;
         } else {
-            await sleep(2000);
+            await sleep(1500);
         }
     }
 
-    if (!newThumbClicked) {
-        console.warn('[Komfy Video] B4 FAIL: No thumbnail found after upload for', slotType);
+    if (!pickerImageClicked) {
+        console.warn('[Komfy Video] B2 TOTAL FAIL for', slotType);
         return false;
     }
 
-    // B5: Verify slot da duoc gan anh
-    await sleep(500);
+    // =========================================================
+    // B3: Verify slot da duoc gan anh (thumbnail hien)
+    // =========================================================
+    await sleep(1500); // Cho UI update
+
     const verifyResult = await send('Runtime.evaluate', {
         expression: `(function(){
             var isStart = '${slotType}' === 'start';
-            var targetText = isStart ? 'start' : 'end';
-            var allEls = [...document.querySelectorAll('button,[role="button"],div[tabindex]')];
-            for (var i = 0; i < allEls.length; i++) {
-                var el = allEls[i];
-                var t = (el.textContent||'').trim().toLowerCase();
-                if (t === targetText) {
-                    var r = el.getBoundingClientRect();
-                    var hasImg = el.querySelector('img') !== null;
-                    return 'slot:' + targetText + ':hasImg=' + hasImg;
+            var targetText = isStart ? 'Start' : 'End';
+
+            // Strategy 1: Tim qua Swap button anchor → check sibling slot co img khong
+            var swapBtn = document.querySelector('button[aria-label="Swap first and last frames"]');
+            if (swapBtn) {
+                var parent = swapBtn.parentElement;
+                if (parent) {
+                    var children = parent.children;
+                    // Start = first child, End = last child (Swap o giua)
+                    var slotIdx = isStart ? 0 : children.length - 1;
+                    var slot = children[slotIdx];
+                    if (slot) {
+                        var slotImg = slot.querySelector('img');
+                        var slotText = (slot.textContent||'').trim();
+                        if (slotImg) {
+                            return 'slot-verified:hasImg=true,src=' + (slotImg.src||'').slice(-30);
+                        }
+                        // Slot still shows text → not assigned yet
+                        if (slotText === targetText) {
+                            return 'slot-empty:text=' + slotText;
+                        }
+                        // Slot has different content (maybe thumbnail replacing text)
+                        return 'slot-changed:text=' + slotText.substring(0,20) + ',hasImg=false';
+                    }
                 }
             }
-            return 'slot-not-visible'; // da duoc assign → hien thumbnail
+
+            // Strategy 2: Tim div with text "Start"/"End" (if still visible = NOT assigned)
+            var allDivs = [...document.querySelectorAll('div')];
+            for (var j = 0; j < allDivs.length; j++) {
+                var div = allDivs[j];
+                var dt = (div.textContent||'').trim();
+                if (dt !== targetText || div.children.length > 0) continue;
+                var dr = div.getBoundingClientRect();
+                if (dr.width === 0 || dr.top < window.innerHeight * 0.5) continue;
+                return 'slot-still-shows-text:' + targetText;
+            }
+
+            // Khong tim thay text "Start"/"End" → co the da duoc replace boi thumbnail
+            return 'slot-text-gone:likely-assigned';
         })()`,
         returnByValue: true,
     });
-    console.log('[Komfy Video] B5 verify:', verifyResult?.result?.value);
-    console.log('[Komfy Video] done:', slotType);
-    return true;
+    const verifyVal = verifyResult?.result?.value || '';
+    console.log('[Komfy Video] B3 verify:', verifyVal);
+
+    // Nhan ket qua
+    const isSuccess = verifyVal.includes('hasImg=true') || verifyVal.includes('likely-assigned') || verifyVal.includes('slot-changed');
+    if (!isSuccess) {
+        console.warn('[Komfy Video] B3 verify uncertain for', slotType, '- continuing anyway');
+    }
+
+    console.log('[Komfy Video] Done:', slotType, isSuccess ? '✅' : '⚠️');
+    return true; // Return true de khong block flow — Direct API se xu ly mediaId
+}
+
+/**
+ * Upload 1 frame image (dataUrl) len Google Flow API → tra ve mediaId moi.
+ * Dung de lam moi mediaId truoc khi inject vao fetch hook.
+ * @param {string} dataUrl - data:image/xxx;base64,...
+ * @returns {string|null} - fresh mediaId or null
+ */
+async function uploadFrameImage(dataUrl) {
+    if (!dataUrl || !sessionData.bearerToken || !sessionData.projectId) {
+        console.warn('[Komfy Video] uploadFrameImage: missing dataUrl/token/projectId');
+        return null;
+    }
+
+    try {
+        // Extract base64 body from data URL
+        const imageBytes = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+
+        // Get fresh reCAPTCHA token
+        const tab = await findFlowTab();
+        if (tab) {
+            try {
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    world: 'MAIN',
+                    func: async () => {
+                        if (window.grecaptcha && window.grecaptcha.enterprise) {
+                            try { return await window.grecaptcha.enterprise.execute('6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV', { action: 'upload_image' }); } catch(e) { return null; }
+                        }
+                        return null;
+                    }
+                });
+                if (results?.[0]?.result) sessionData.xbv = results[0].result;
+            } catch(e) {}
+        }
+
+        const uploadBody = JSON.stringify({
+            clientContext: {
+                projectId: sessionData.projectId,
+                tool: 'PINHOLE',
+            },
+            imageBytes: imageBytes,
+            isUserUploaded: true,
+            isHidden: true,
+            mimeType: 'image/jpeg',
+            fileName: 'komfy_frame.jpg'
+        });
+
+        console.log('[Komfy Video] Uploading frame image | size:', (imageBytes.length / 1024).toFixed(0), 'KB');
+
+        const FLOW_API = 'https://aisandbox-pa.googleapis.com/v1';
+        const uploadRes = await fetch(FLOW_API + '/flow/uploadImage', {
+            method: 'POST',
+            headers: {
+                'authorization': sessionData.bearerToken || '',
+                'x-browser-validation': sessionData.xbv || '',
+                'content-type': 'text/plain;charset=UTF-8',
+                'accept': '*/*',
+                'origin': 'https://labs.google',
+                'referer': 'https://labs.google/',
+            },
+            body: uploadBody,
+        });
+
+        const uploadText = await uploadRes.text();
+        console.log('[Komfy Video] Upload frame response:', uploadRes.status);
+
+        if (!uploadRes.ok) {
+            console.warn('[Komfy Video] Upload frame failed:', uploadRes.status, uploadText.substring(0, 200));
+            return null;
+        }
+
+        const parsed = JSON.parse(uploadText);
+        const mediaId = parsed?.media?.name || parsed?.mediaId;
+        console.log('[Komfy Video] ✅ Frame uploaded! mediaId:', mediaId);
+        return mediaId || null;
+    } catch (e) {
+        console.error('[Komfy Video] uploadFrameImage error:', e.message);
+        return null;
+    }
 }
 
 /**
  * Xu ly I2V frame selection cho both start va end.
+ * ★ CHIẾN LƯỢC MỚI:
+ *   1. Re-upload ảnh từ dataUrl → lấy mediaIds MỚI (tránh stale cache)
+ *   2. Cập nhật i2vData.startImage/endImage với mediaIds mới
+ *   3. Fetch hook sẽ inject mediaIds mới vào API body khi submit
+ *   4. UI slot click vẫn thử nhưng KHÔNG critical — fetch hook là chính
+ *
  * @param {object} i2vData
  * @param {Function} send
  * @param {Function} sleep
@@ -258,25 +379,34 @@ async function handleI2VFrameSelection(i2vData, send, sleep) {
     const startDataUrl = i2vData.startImageDataUrl || null;
     const endDataUrl   = i2vData.endImageDataUrl   || null;
 
+    // ★ STRATEGY: Upload frames → lay fresh mediaIds.
+    // Interceptor se REBUILD body hoan toan moi cho I2V endpoint.
+    // KHONG fill UI slots — Asset Picker automation pha vo Video mode.
+
     if (startDataUrl) {
-        console.log('[Komfy Video] Setting Start frame via paste...');
-        const ok = await selectFrameFromPicker('start', startDataUrl, send, sleep);
-        if (!ok) console.warn('[Komfy Video] Start frame paste failed!');
-        await sleep(500);
-    } else if (i2vData.startImage) {
-        console.log('[Komfy Video] Start frame: mediaId available but no dataUrl, skipping UI paste');
+        console.log('[Komfy Video] Uploading Start frame for fresh mediaId...');
+        const freshStartId = await uploadFrameImage(startDataUrl);
+        if (freshStartId) {
+            console.log('[Komfy Video] Start frame mediaId:', freshStartId.substring(0, 20));
+            i2vData.startImage = freshStartId;
+        } else {
+            console.warn('[Komfy Video] Start frame upload failed, keeping old:', i2vData.startImage?.substring(0, 20));
+        }
     }
 
     if (endDataUrl) {
-        console.log('[Komfy Video] Setting End frame via paste...');
-        const ok = await selectFrameFromPicker('end', endDataUrl, send, sleep);
-        if (!ok) console.warn('[Komfy Video] End frame paste failed!');
-        await sleep(500);
-    } else if (i2vData.endImage) {
-        console.log('[Komfy Video] End frame: mediaId available but no dataUrl, skipping UI paste');
+        console.log('[Komfy Video] Uploading End frame for fresh mediaId...');
+        const freshEndId = await uploadFrameImage(endDataUrl);
+        if (freshEndId) {
+            console.log('[Komfy Video] End frame mediaId:', freshEndId.substring(0, 20));
+            i2vData.endImage = freshEndId;
+        } else {
+            console.warn('[Komfy Video] End frame upload failed, keeping old:', i2vData.endImage?.substring(0, 20));
+        }
     }
 
-    await sleep(500);
+    console.log('[Komfy Video] Frame mediaIds for interceptor: start=', i2vData.startImage?.substring(0, 20), '| end=', i2vData.endImage?.substring(0, 20));
+    await sleep(300);
 }
 
 /**

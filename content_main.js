@@ -17,10 +17,52 @@ if (window.__KOMFY_LOADED__) {
     // Gui state ban dau
     setTimeout(() => {
         window.postMessage({ type: 'KOMFY_STATE', projectId: getProjectIdFromUrl() }, '*');
-        // Kich hoat 1 request ngam de chrome.webRequest ben background.js bat duoc Token ngay lap tuc
-        // Ma khong can nguoi dung phai tu thao tac hay bam "Op Dong Bo"
-        fetch('https://labs.google/fx/api/trpc/user.get?batch=1', { method: 'GET' }).catch(() => { });
-    }, 1000);
+    }, 500);
+
+    // ★ Try to extract Bearer token from page auth state
+    // Google apps store OAuth2 tokens in various locations
+    async function tryExtractToken() {
+        // Strategy 1: Look for token in common Google auth patterns
+        try {
+            // gapi.auth2 (older Google Sign-In)
+            if (window.gapi?.auth2) {
+                const authInst = window.gapi.auth2.getAuthInstance();
+                const user = authInst?.currentUser?.get();
+                const authResp = user?.getAuthResponse(true);
+                if (authResp?.access_token) {
+                    window.postMessage({ type: 'KOMFY_TOKEN_CAPTURED', token: 'Bearer ' + authResp.access_token, projectId: getProjectIdFromUrl() }, '*');
+                    return true;
+                }
+            }
+        } catch(e) {}
+
+        // Strategy 2: Look for token in Firebase auth
+        try {
+            if (window.firebase?.auth) {
+                const user = window.firebase.auth().currentUser;
+                if (user) {
+                    const token = await user.getIdToken();
+                    if (token) {
+                        window.postMessage({ type: 'KOMFY_TOKEN_CAPTURED', token: 'Bearer ' + token, projectId: getProjectIdFromUrl() }, '*');
+                        return true;
+                    }
+                }
+            }
+        } catch(e) {}
+
+        // Strategy 3: Trigger same-origin request (for cookie-based auth capture)
+        // ★ KHONG fetch cross-origin aisandbox — se bi CORS block va log loi
+        try {
+            fetch('https://labs.google/fx/api/trpc/user.get?batch=1', { method: 'GET' }).catch(() => {});
+        } catch(e) {}
+
+        return false;
+    }
+
+    // Wait for page auth to initialize, then try extraction
+    setTimeout(() => tryExtractToken(), 2000);
+    setTimeout(() => tryExtractToken(), 5000);
+    setTimeout(() => tryExtractToken(), 10000);
 
     // =====================================================
     // UI AUTOMATION: Type prompt + Click Create button

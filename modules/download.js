@@ -461,6 +461,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'UPDATE_STATE') {
         if (message.projectId && !sessionData.projectId) { sessionData.projectId = message.projectId; sendToProxy(); }
     }
+    // ★ Token captured from page fetch interceptor (content_fetch_interceptor.js → content_isolated.js)
+    if (message.action === 'TOKEN_CAPTURED' && message.token) {
+        if (sessionData.bearerToken !== message.token) {
+            sessionData.bearerToken = message.token;
+            if (message.projectId) sessionData.projectId = message.projectId;
+            console.log('[Komfy] ✅ Token captured from page fetch interceptor' + (message.projectId ? ' (project: ' + message.projectId.substring(0, 12) + ')' : ''));
+            persistToken();
+            sendToProxy().catch(() => {});
+        }
+    }
     if (message.action === 'GET_STATE') {
         // Resolve project name: active lock name, or reverse lookup from projectMap
         chrome.storage.local.get(['komfyProjectMap'], (stored) => {

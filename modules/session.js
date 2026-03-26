@@ -19,6 +19,11 @@ const PROXY_EXECUTE_URL = 'http://127.0.0.1:3120/api/internal/execute-request';
 const FLOW_URL = 'https://labs.google/fx/tools/flow';
 const KOMFY_PROJECT_PREFIX = '[KS] ';
 const KOMFY_PROJECT_NAME = 'komfy-studio'; // legacy fallback
+
+// All workflows share a single fixed Flow project.
+// Eliminates per-workflow project creation, scan, and rename (the main source of errors).
+const KOMFY_FIXED_PROJECT = '[KS] Komfy Studio';
+
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
 // UI callbacks map (used by polling and content scripts)
@@ -107,86 +112,36 @@ function persistToken() {
     }
 }
 
-// ── Project Lock ──
-// Ensures only one project is active at a time.
-// Tasks needing a different project WAIT for current tasks to finish.
-// Tasks needing the SAME project proceed in parallel.
+// -- Project Lock --
+// Since all tasks now share a single fixed project (KOMFY_FIXED_PROJECT),
+// there is no need to queue tasks of different projects.
+// Keep the API signature for compatibility with existing callers.
 
 const _projectLock = {
-    activeName: null,   // "[KS] Workflow A" or null
+    activeName: KOMFY_FIXED_PROJECT,
     taskCount: 0,
-    waiters: []         // { projectName, resolve, timer }
+    waiters: [] // always empty now
 };
 
-// In-memory: last time each project was verified to exist (for staleness check)
+// In-memory: last time project was verified to exist (for staleness check)
 const _projectVerifiedAt = {};
 
 /**
- * Acquire project lock. Returns immediately if same project or no active project.
- * Queues if a different project is active with running tasks (max wait: 5 min).
- * @param {string|null} projectName - null = credential-only (no lock needed)
+ * Acquire project lock.
+ * All tasks share KOMFY_FIXED_PROJECT -> always immediate, no queuing.
  */
 function acquireProjectLock(projectName) {
-    return new Promise((resolve, reject) => {
-        if (!projectName) { resolve(); return; }
-
-        if (!_projectLock.activeName || _projectLock.activeName === projectName) {
-            _projectLock.activeName = projectName;
-            _projectLock.taskCount++;
-            console.log('[Komfy] [ProjectLock] Acquired:', projectName, '(tasks:', _projectLock.taskCount + ')');
-            resolve();
-            return;
-        }
-
-        // Different project active → queue
-        console.log('[Komfy] [ProjectLock] ⏳ Waiting for "' + _projectLock.activeName + '" (' + _projectLock.taskCount + ' tasks) before "' + projectName + '"');
-        const timer = setTimeout(() => {
-            _projectLock.waiters = _projectLock.waiters.filter(w => w._id !== waiterId);
-            reject(new Error('ProjectLock timeout: waited 5min for "' + _projectLock.activeName + '" to finish'));
-        }, 300000); // 5 min timeout
-
-        const waiterId = Date.now() + '_' + Math.random();
-        _projectLock.waiters.push({
-            _id: waiterId,
-            projectName,
-            resolve: () => { clearTimeout(timer); resolve(); }
-        });
-    });
+    _projectLock.taskCount++;
+    console.log('[Komfy] [ProjectLock] Acquired (fixed project, tasks:', _projectLock.taskCount + ')');
+    return Promise.resolve();
 }
 
 /**
  * Release project lock after task completes.
- * When all tasks on current project finish, activates next queued project.
  */
 function releaseProjectLock(projectName) {
-    if (!projectName) return;
-    if (_projectLock.activeName !== projectName) return;
-
     _projectLock.taskCount = Math.max(0, _projectLock.taskCount - 1);
-    console.log('[Komfy] [ProjectLock] Released:', projectName, '(remaining:', _projectLock.taskCount + ')');
-
-    if (_projectLock.taskCount > 0) return;
-
-    // All tasks done — activate next project in queue
-    _projectLock.activeName = null;
-
-    if (_projectLock.waiters.length === 0) return;
-
-    // Group: all waiters for the same (first) project proceed together
-    const nextProject = _projectLock.waiters[0].projectName;
-    const batch = [];
-    _projectLock.waiters = _projectLock.waiters.filter(w => {
-        if (w.projectName === nextProject) {
-            batch.push(w);
-            return false;
-        }
-        return true;
-    });
-
-    _projectLock.activeName = nextProject;
-    _projectLock.taskCount = batch.length;
-    console.log('[Komfy] [ProjectLock] → Switching to "' + nextProject + '" (' + batch.length + ' tasks)');
-    batch.forEach(w => w.resolve());
+    console.log('[Komfy] [ProjectLock] Released (remaining:', _projectLock.taskCount + ')');
 }
 
 

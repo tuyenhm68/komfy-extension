@@ -59,7 +59,15 @@ async function processTask(task) {
 
     let result;
     try {
-        if (task.endpoint === 'PREPARE_PROJECT') {
+        if (task.endpoint === 'RELOAD_EXTENSION') {
+            // Remote reload — ExtensionManager calls this after auto-update
+            console.log('[Komfy] 🔄 RELOAD_EXTENSION received — reloading in 600ms...');
+            result = { ok: true, status: 200, body: '{"reloading":true}' };
+            // Delay slightly so this response can be sent back before SW terminates
+            setTimeout(() => chrome.runtime.reload(), 600);
+
+        } else if (task.endpoint === 'PREPARE_PROJECT') {
+
             // ★ Pre-warm: verify/create project BEFORE any upload/generate task
             const body = typeof task.body === 'string' ? JSON.parse(task.body) : task.body;
             const pName = body.projectName || null;
@@ -143,6 +151,10 @@ async function processTask(task) {
                         tool: 'PINHOLE',
                     },
                     imageBytes: imageBytes,
+                    isUserUploaded: true,
+                    isHidden: true,
+                    mimeType: 'image/jpeg',
+                    fileName: 'komfy_ingredient.jpg'
                 });
 
                 const FLOW_API = 'https://aisandbox-pa.googleapis.com/v1';
@@ -168,7 +180,8 @@ async function processTask(task) {
                 // Human-like pause before upload (simulate user selecting file)
                 await humanDelay(600, 1500);
 
-                const uploadRes = await fetch(FLOW_API + '/flow/uploadImage', {
+
+                let uploadRes = await fetch(FLOW_API + '/flow/uploadImage', {
                     method: 'POST',
                     headers: {
                         'authorization': sessionData.bearerToken || '',
@@ -181,8 +194,51 @@ async function processTask(task) {
                     body: uploadBody,
                 });
 
-                const uploadText = await uploadRes.text();
+                let uploadText = await uploadRes.text();
                 console.log('[Komfy] Upload response status:', uploadRes.status);
+
+                // ★ RETRY LOGIC FOR STALE CREDENTIALS (401 / 403)
+                if (!uploadRes.ok && (uploadRes.status === 401 || uploadRes.status === 403)) {
+                    console.warn(`[Komfy] Upload failed ${uploadRes.status} (Stale credentials). Forcing reload and retry...`);
+                    // Force refresh tab to get new bearer token
+                    await ensureFlowTab(true, lockProjectName || null); 
+                    await humanDelay(2000, 3000); // Give time for page to settle
+
+                    // Refresh recaptcha using the new tab
+                    const newTab = await findFlowTab();
+                    if (newTab) {
+                        try {
+                            const results = await chrome.scripting.executeScript({
+                                target: { tabId: newTab.id },
+                                world: 'MAIN',
+                                func: async () => {
+                                    if (window.grecaptcha && window.grecaptcha.enterprise) {
+                                        try { return await window.grecaptcha.enterprise.execute('6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV', { action: 'upload_image' }); } catch(e) { return null; }
+                                    }
+                                    return null;
+                                }
+                            });
+                            if (results?.[0]?.result) sessionData.xbv = results[0].result;
+                        } catch(e) {}
+                    }
+
+                    // Retry Fetch
+                    uploadRes = await fetch(FLOW_API + '/flow/uploadImage', {
+                        method: 'POST',
+                        headers: {
+                            'authorization': sessionData.bearerToken || '',
+                            'x-browser-validation': sessionData.xbv || '',
+                            'content-type': 'text/plain;charset=UTF-8',
+                            'accept': '*/*',
+                            'origin': 'https://labs.google',
+                            'referer': 'https://labs.google/',
+                        },
+                        body: uploadBody,
+                    });
+                    
+                    uploadText = await uploadRes.text();
+                    console.log('[Komfy] Upload retry response status:', uploadRes.status);
+                }
 
                 if (!uploadRes.ok) {
                     throw new Error('Upload failed: HTTP ' + uploadRes.status + ' - ' + uploadText.substring(0, 200));
@@ -233,18 +289,28 @@ async function processTask(task) {
                     'VIDEO_ASPECT_RATIO_LANDSCAPE';
                 const pName = videoBody.projectName || (videoBody.clientContext && videoBody.clientContext.projectName) || null;
                 const videoModelKey = (videoBody.requests[0] && videoBody.requests[0].videoModelKey) || null;
-                const targetVideoModel = videoBody.targetVideoModel || (videoModelKey?.toLowerCase().includes('quality') ? 'Veo 3.1 - Quality' : 'Veo 3.1 - Fast');
+                const targetVideoModel = videoModelKey?.toLowerCase().includes('quality') ? 'Veo 3.1 - Quality' : 'Veo 3.1 - Fast';
                 console.log('[Komfy] Video task (UI) | project:', pName, '| aspectRatio:', aspectRatio, '| model:', videoModelKey, '| target:', targetVideoModel, '| ingredients:', videoImageInputs.length, '| prompt:', prompt.substring(0, 40));
                 result = await generateViaUI(prompt, aspectRatio, pName, videoModelKey, null, targetVideoModel, 'Ingredients', videoImageInputs, task.requestId);
             }
 
         } else if (task.endpoint.includes('batchAsyncGenerateVideoStartImage') ||
                    task.endpoint.includes('batchAsyncGenerateVideoEndImage') ||
-                   task.endpoint.includes('batchAsyncGenerateVideoStartEndImage')) {
+                   task.endpoint.includes('batchAsyncGenerateVideoStartAndEndImage')) {
             // I2V / Last Frame / Interpolation
             // ★ DIRECT API FIRST — I2V co startImage/endImage mediaId trong body
             const i2vBody = JSON.parse(task.body);
             const hasMediaId = !!(i2vBody.requests?.[0]?.startImage?.mediaId || i2vBody.requests?.[0]?.endImage?.mediaId);
+
+            // ★ DEBUG: Full I2V data trace at entry point
+            console.log('[Komfy] [DEBUG] I2V task entry:',
+                '| hasMediaId:', hasMediaId,
+                '| startImage:', JSON.stringify(i2vBody.requests?.[0]?.startImage || null),
+                '| endImage:', JSON.stringify(i2vBody.requests?.[0]?.endImage || null),
+                '| startFrameDataUrl:', i2vBody.startFrameDataUrl ? 'YES(' + i2vBody.startFrameDataUrl.length + ' chars)' : 'null',
+                '| endFrameDataUrl:', i2vBody.endFrameDataUrl ? 'YES(' + i2vBody.endFrameDataUrl.length + ' chars)' : 'null',
+                '| videoModelKey:', i2vBody.requests?.[0]?.videoModelKey
+            );
 
             if (hasMediaId) {
                 try {
@@ -259,9 +325,17 @@ async function processTask(task) {
 
             if (!result) {
                 // UI automation fallback
+                // Extract params truoc de dung cho ensureFlowTab
+                const prompt = i2vBody.requests?.[0]?.textInput?.structuredPrompt?.parts?.[0]?.text || 'A beautiful scene';
+                const aspectRatio = i2vBody.uiAspectRatio || i2vBody.requests?.[0]?.aspectRatio || '16:9';
+                const resolutionMultiplier = i2vBody.resolutionMultiplier || 'x1';
+                const pName = i2vBody.projectName || null;
+                const videoModelKey = i2vBody.requests?.[0]?.videoModelKey || null;
+
                 if (!sessionData.bearerToken) {
-                    console.log('[Komfy] I2V: Chua co token → ensureFlowTab...');
-                    await ensureFlowTab(false);
+                    // ★ Goi ensureFlowTab VOI project name de navigate toi project + capture credentials
+                    console.log('[Komfy] I2V: Chua co token → ensureFlowTab (project:', pName, ')...');
+                    await ensureFlowTab(false, pName);
                     const started = Date.now();
                     while (!sessionData.bearerToken && Date.now() - started < 15000) {
                         await new Promise(r => setTimeout(r, 500));
@@ -271,19 +345,15 @@ async function processTask(task) {
                     }
                 }
 
-                const prompt = i2vBody.requests?.[0]?.textInput?.structuredPrompt?.parts?.[0]?.text || 'A beautiful scene';
-                const aspectRatio = i2vBody.uiAspectRatio || i2vBody.requests?.[0]?.aspectRatio || '16:9';
-                const resolutionMultiplier = i2vBody.resolutionMultiplier || 'x1';
-                const pName = i2vBody.projectName || null;
-                const videoModelKey = i2vBody.requests?.[0]?.videoModelKey || null;
-
                 const targetVideoModel2 = i2vBody.targetVideoModel || (videoModelKey?.toLowerCase().includes('quality') ? 'Veo 3.1 - Quality' : 'Veo 3.1 - Fast');
                 const videoType2 = (i2vBody.requests[0]?.startImage || i2vBody.requests[0]?.endImage) ? 'Frames' : 'Ingredients';
 
                 const i2vPayload = {
                     endpoint: task.endpoint,
                     startImage: i2vBody.requests[0]?.startImage?.mediaId || null,
+                    startCrop: i2vBody.requests[0]?.startImage?.cropCoordinates || null,
                     endImage: i2vBody.requests[0]?.endImage?.mediaId || null,
+                    endCrop: i2vBody.requests[0]?.endImage?.cropCoordinates || null,
                     startImageDataUrl: i2vBody.startFrameDataUrl || null,
                     endImageDataUrl: i2vBody.endFrameDataUrl || null,
                     videoModelKey: videoModelKey
@@ -365,12 +435,25 @@ async function processTask(task) {
         activeTaskIds.delete(task.requestId);
     }
 
-    // Gui ket qua ve FlowBroker
-    fetch(PROXY_EXECUTE_URL + '/respond', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requestId: task.requestId, clientId: sessionData.clientId, result }),
-    }).catch(() => {});
+    // Gui ket qua ve FlowBroker (retry 3 lan neu fail)
+    const respondBody = JSON.stringify({ requestId: task.requestId, clientId: sessionData.clientId, result });
+    for (let retry = 0; retry < 3; retry++) {
+        try {
+            const resp = await fetch(PROXY_EXECUTE_URL + '/respond', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: respondBody,
+            });
+            if (resp.ok) {
+                console.log('[Komfy] ✅ Respond sent:', task.endpoint, '| requestId:', task.requestId?.substring(0, 12));
+                break;
+            }
+            console.warn('[Komfy] Respond HTTP', resp.status, '| retry', retry + 1);
+        } catch (respondErr) {
+            console.warn('[Komfy] Respond failed (retry', retry + 1 + '):', respondErr.message?.substring(0, 60));
+            if (retry < 2) await new Promise(r => setTimeout(r, 500 * (retry + 1)));
+        }
+    }
 }
 
 // =========================================================

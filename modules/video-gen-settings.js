@@ -131,26 +131,41 @@ async function openPopover(send, sleep) {
         try {
             await send('Page.reload', { ignoreCache: true });
             console.log('[Komfy Video] B0.1 Tab reloaded, waiting for page...');
-            for (let w = 0; w < 12; w++) {
+            // ★ Wait for bottom bar specifically (not just any button)
+            await sleep(3000); // Initial wait for page load
+            let pageReady = false;
+            for (let w = 0; w < 20; w++) {
                 const barCheck = await send('Runtime.evaluate', {
                     expression: `(function(){
-                        if (document.querySelector('[role="textbox"],[contenteditable="true"]')) return true;
                         var btns = Array.from(document.querySelectorAll('button,[role="button"]'));
                         for (var i = 0; i < btns.length; i++) {
                             var r = btns[i].getBoundingClientRect();
-                            if (r.width > 50 && r.height > 20) return true;
+                            var t = (btns[i].textContent||'').toLowerCase();
+                            if (r.bottom > window.innerHeight - 120 && r.width > 50 &&
+                                (t.includes('veo') || t.includes('banana') || t.includes('imagen') || t.includes('video') || t.includes('arrow_drop_down')))
+                                return 'bottom-bar';
+                        }
+                        if (document.querySelector('[role="textbox"],[contenteditable="true"]')) return 'textbox';
+                        for (var i = 0; i < btns.length; i++) {
+                            var r = btns[i].getBoundingClientRect();
+                            if (r.width > 50 && r.height > 20) return 'some-btn';
                         }
                         return false;
                     })()`,
                     returnByValue: true,
                 });
-                if (barCheck?.result?.value) {
-                    console.log('[Komfy Video] B0.1 Page ready after reload (' + (w * 500) + 'ms)');
+                const val = barCheck?.result?.value;
+                if (val) {
+                    console.log('[Komfy Video] B0.1 Page ready after reload: ' + val + ' (' + (w * 500 + 3000) + 'ms)');
+                    pageReady = true;
+                    if (val === 'bottom-bar') break; // Best case — bottom bar found
+                    // For textbox/some-btn, keep waiting a bit for bottom bar
+                    if (w < 15) { await sleep(500); continue; }
                     break;
                 }
                 await sleep(500);
             }
-            await sleep(800);
+            await sleep(1000);
             await tryOnce();
         } catch (reloadErr) {
             console.warn('[Komfy Video] B0.1 Reload error:', reloadErr.message);

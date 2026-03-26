@@ -80,9 +80,10 @@ async function generateViaUI(
         targetVideoModel = 'Veo 3.1 - Fast';
     }
 
-    const resolvedVideoType = (i2vData && (i2vData.startImage || i2vData.endImage))
-        ? 'Frames'
-        : (videoType || 'Ingredients');
+    // ★ I2V: Dung VIDEO mode — submit gui batchAsyncGenerateVideoText.
+    // Interceptor se REBUILD body hoan toan moi cho batchAsyncGenerateVideoStartEndImage.
+    // KHONG dung Frames mode vi Asset Picker automation pha vo Video mode.
+    const resolvedVideoType = i2vData ? 'Video' : (videoType || 'Video');
 
     // aspectRatio is now direct (16:9, 9:16) — no orientation mapping needed
 
@@ -109,6 +110,8 @@ async function generateViaUI(
     const tabId = tab.id;
 
     console.log('[Komfy Video] CDP tab:', tabId, 'orient:', aspectRatio, 'model:', targetVideoModel, 'prompt:', prompt.substring(0, 40));
+
+    // ★ I2V: No longer force reloading the tab to support concurrent I2V generations.
 
     // Activate tab within window (CDP needs active tab for mouse/keyboard events)
     // Do NOT focus the Chrome window — avoid stealing OS focus from user
@@ -346,32 +349,90 @@ async function generateViaUI(
 
         // Wait for bottom bar
         let detectedBarType = null;
+        const detectBottomBar = `(function(){
+            var btns = document.querySelectorAll('button, [role="button"]');
+            for (var i = 0; i < btns.length; i++) {
+                var r = btns[i].getBoundingClientRect();
+                var text = (btns[i].textContent||'').toLowerCase();
+                if (r.bottom > window.innerHeight - 120 && r.width > 50 &&
+                    (text.includes('veo') || text.includes('video'))) return 'veo';
+            }
+            for (var i = 0; i < btns.length; i++) {
+                var r = btns[i].getBoundingClientRect();
+                var text = (btns[i].textContent||'').toLowerCase();
+                if (r.bottom > window.innerHeight - 120 && r.width > 50 &&
+                    (text.includes('banana') || text.includes('imagen') || /x[1-4]/.test(text))) return 'image-model';
+            }
+            return !!(document.querySelector('[role="textbox"],[contenteditable="true"]')) ? 'textbox' : null;
+        })()`;
         for (let w = 0; w < 10; w++) {
-            const barCheck = await send('Runtime.evaluate', {
-                expression: `(function(){
-                    var btns = document.querySelectorAll('button, [role="button"]');
-                    for (var i = 0; i < btns.length; i++) {
-                        var r = btns[i].getBoundingClientRect();
-                        var text = (btns[i].textContent||'').toLowerCase();
-                        if (r.bottom > window.innerHeight - 120 && r.width > 50 &&
-                            (text.includes('veo') || text.includes('video'))) return 'veo';
-                    }
-                    for (var i = 0; i < btns.length; i++) {
-                        var r = btns[i].getBoundingClientRect();
-                        var text = (btns[i].textContent||'').toLowerCase();
-                        if (r.bottom > window.innerHeight - 120 && r.width > 50 &&
-                            (text.includes('banana') || text.includes('imagen') || /x[1-4]/.test(text))) return 'image-model';
-                    }
-                    return !!(document.querySelector('[role="textbox"],[contenteditable="true"]')) ? 'textbox' : null;
-                })()`,
-                returnByValue: true,
-            });
+            const barCheck = await send('Runtime.evaluate', { expression: detectBottomBar, returnByValue: true });
             detectedBarType = barCheck?.result?.value;
             if (detectedBarType) {
                 console.log('[Komfy Video] Bottom bar ready (' + detectedBarType + ') after', w * 500, 'ms');
                 break;
             }
             await sleep(500);
+        }
+
+        // ★ Bottom bar not found → log diagnostics + reload + retry
+        if (!detectedBarType) {
+            const diagResult = await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    var info = { totalBtns: btns.length, url: location.href.substring(0,80), innerH: window.innerHeight, bottomBtns: [], hasTb: !!(document.querySelector('[role="textbox"],[contenteditable="true"]')) };
+                    for (var i = 0; i < btns.length; i++) {
+                        var r = btns[i].getBoundingClientRect();
+                        if (r.width < 10 || r.height < 10) continue;
+                        if (r.bottom > window.innerHeight - 200) {
+                            info.bottomBtns.push({ t: (btns[i].textContent||'').trim().substring(0,30), w: Math.round(r.width), h: Math.round(r.height), b: Math.round(r.bottom) });
+                        }
+                    }
+                    return info;
+                })()`,
+                returnByValue: true,
+            });
+            console.warn('[Komfy Video] Bottom bar NOT found! Page diagnostics:', JSON.stringify(diagResult?.result?.value));
+
+            // Force reload and retry
+            console.log('[Komfy Video] Reloading page to recover bottom bar...');
+            await send('Page.reload', { ignoreCache: true });
+            await sleep(3000);
+            // Wait for page to be interactive
+            for (let rw = 0; rw < 20; rw++) {
+                const readyCheck = await send('Runtime.evaluate', {
+                    expression: `(function(){
+                        var hasTb = !!(document.querySelector('[role="textbox"],[contenteditable="true"]'));
+                        var btns = document.querySelectorAll('button,[role="button"]');
+                        var hasBtns = false;
+                        for (var i = 0; i < btns.length; i++) {
+                            var r = btns[i].getBoundingClientRect();
+                            if (r.width > 50 && r.height > 20) { hasBtns = true; break; }
+                        }
+                        return hasTb || hasBtns;
+                    })()`,
+                    returnByValue: true,
+                }).catch(() => null);
+                if (readyCheck?.result?.value) {
+                    console.log('[Komfy Video] Page ready after reload (' + (rw * 500 + 3000) + 'ms)');
+                    break;
+                }
+                await sleep(500);
+            }
+            await sleep(1000);
+            // Retry bottom bar detection
+            for (let w = 0; w < 15; w++) {
+                const barCheck2 = await send('Runtime.evaluate', { expression: detectBottomBar, returnByValue: true });
+                detectedBarType = barCheck2?.result?.value;
+                if (detectedBarType) {
+                    console.log('[Komfy Video] Bottom bar ready after reload (' + detectedBarType + ') after', w * 500, 'ms');
+                    break;
+                }
+                await sleep(500);
+            }
+            if (!detectedBarType) {
+                console.warn('[Komfy Video] Bottom bar STILL not found after reload — proceeding anyway...');
+            }
         }
 
         // After exiting detail view, bottom bar may still show image model.
@@ -458,13 +519,15 @@ async function generateViaUI(
         // Phase I2V: Frame selection
         // =============================================
         if (i2vData) {
+            // Upload frames de lay fresh mediaIds — KHONG fill UI slots
+            // Interceptor se REBUILD body cho I2V endpoint khi submit
             await handleI2VFrameSelection(i2vData, send, sleep);
-            await reVerifyVideoModeAfterGallery(send, sleep);
         }
 
         // =============================================
         // Phase: Install Fetch Hook
         // =============================================
+        // ★ Set i2vData for interceptor — interceptor se REBUILD body cho I2V endpoint
         const i2vBase64 = i2vData ? btoa(unescape(encodeURIComponent(JSON.stringify(i2vData)))) : '';
         await send('Runtime.evaluate', {
             expression: `
@@ -497,23 +560,14 @@ async function generateViaUI(
                 window.fetch = async function(...args) {
                     let url = typeof args[0]==='string'?args[0]:(args[0]?.url||'');
 
-                    if (window.__komfy_i2vData__ && url.includes('batchAsyncGenerateVideoText')) {
-                        const endpointSuffix = window.__komfy_i2vData__.endpoint.split(':').pop();
-                        url = url.replace('batchAsyncGenerateVideoText', endpointSuffix);
-                        args[0] = url;
-                        if (args[1] && args[1].body) {
-                            try {
-                                const b = JSON.parse(args[1].body);
-                                if (b.requests && b.requests[0]) {
-                                    const req = b.requests[0];
-                                    if (window.__komfy_i2vData__.startImage) req.startImage = { mediaId: window.__komfy_i2vData__.startImage };
-                                    if (window.__komfy_i2vData__.endImage)   req.endImage   = { mediaId: window.__komfy_i2vData__.endImage };
-                                    if (window.__komfy_i2vData__.videoModelKey) req.videoModelKey = window.__komfy_i2vData__.videoModelKey;
-                                    args[1] = Object.assign({}, args[1], { body: JSON.stringify(b) });
-                                }
-                            } catch(e) { console.error('[Komfy] I2V inject err', e); }
-                        }
-                        console.log('[Komfy] Fetch swapped to', url);
+                    // ★ I2V: CDP Fetch handles URL swap + body rebuild at network level
+                    // (bypasses CORS). JS fetch hook no longer modifies I2V requests.
+
+                    // ★ Fetch counter — track all fetches after submit for diagnostics
+                    if (window.__komfy_clickTime && url.includes('aisandbox')) {
+                        window.__komfy_fetchCount__ = (window.__komfy_fetchCount__ || 0) + 1;
+                        window.__komfy_fetchUrls__ = window.__komfy_fetchUrls__ || [];
+                        window.__komfy_fetchUrls__.push(url.substring(url.lastIndexOf('/') + 1).substring(0, 50));
                     }
 
                     const res = await origFetch.apply(this, args);
@@ -525,9 +579,22 @@ async function generateViaUI(
                             // Truoc submit, Google Flow co the fire background fetches (status check)
                             // ma response chua genId cu → gay nham video n-1
                             const isActiveSession = !!(activeSid && activeSid.length > 0 && window.__komfy_clickTime);
+
+                            // ★ Forward response status to SW log (always, for diagnostics)
+                            window.postMessage({
+                                type: 'KOMFY_DEBUG_FETCH',
+                                url: '[HOOK-RESPONSE] ' + url.substring(url.lastIndexOf('/') + 1) + ' status=' + res.status + ' ok=' + res.ok,
+                                body: 'isActiveSession=' + isActiveSession + ' | clickTime=' + (window.__komfy_clickTime ? 'SET' : 'NULL') + ' | sid=' + (activeSid || 'none').substring(0, 20)
+                            }, '*');
+
                             if (!res.ok && isActiveSession) {
                                 window.__komfy_genError__ = 'HTTP ' + res.status + ' - ' + res.statusText;
                                 console.log('[Komfy Fetch] API error: HTTP', res.status);
+                                window.postMessage({
+                                    type: 'KOMFY_DEBUG_FETCH',
+                                    url: '[HOOK-RESPONSE-ERROR] HTTP ' + res.status,
+                                    body: res.statusText || 'no status text'
+                                }, '*');
                             } else if (isActiveSession) {
                                 const d = await cloned.json();
                                 console.log('[Komfy Fetch] batchAsyncGenerateVideo response keys:', Object.keys(d || {}));
@@ -540,8 +607,18 @@ async function generateViaUI(
                                     window.__komfy_genSid__   = activeSid;
                                     window.__komfy_genIdAt__  = Date.now();
                                     console.log('[Komfy Fetch] ✅ Captured genId:', gid, '| sid:', activeSid.substring(0,20), '| at:', window.__komfy_genIdAt__);
+                                    window.postMessage({
+                                        type: 'KOMFY_DEBUG_FETCH',
+                                        url: '[HOOK-RESPONSE-OK] genId captured',
+                                        body: 'genId=' + String(gid).substring(0, 40)
+                                    }, '*');
                                 } else {
                                     console.log('[Komfy Fetch] No genId in response:', JSON.stringify(d).substring(0, 200));
+                                    window.postMessage({
+                                        type: 'KOMFY_DEBUG_FETCH',
+                                        url: '[HOOK-RESPONSE-NO-GENID]',
+                                        body: 'keys=' + JSON.stringify(Object.keys(d || {})) + ' | data=' + JSON.stringify(d).substring(0, 300)
+                                    }, '*');
                                 }
                                 const apiErr = d?.error?.message || d?.error?.status
                                     || (d?.generationResults?.[0]?.error?.message)
@@ -571,6 +648,7 @@ async function generateViaUI(
                     : null;
                 window.__komfy_genId__  = null;
                 window.__komfy_genSid__ = window.__komfy_sessionId__;
+                window.__komfy_i2vSwapDone__ = false;
             })()`,
             awaitPromise: false,
         });
@@ -1048,7 +1126,64 @@ async function generateViaUI(
         });
         console.log('[Komfy Video] Observer install result:', JSON.stringify(obsInstall?.result?.value));
 
+        // ★ CDP Fetch interception: swap URL at Request stage + inject CORS at Response stage
+        // Request: browser sends to batchAsyncGenerateVideoText WITH cookies
+        // Response: CDP adds CORS headers so page can read the response
+        let cdpFetchListener = null;
+        if (i2vData) {
+            const targetEndpoint = (i2vData.endpoint || '').split(':').pop() || 'batchAsyncGenerateVideoStartAndEndImage';
+            
+            cdpFetchListener = (source, method, params) => {
+                if (source.tabId !== tabId || method !== 'Fetch.requestPaused') return;
+                const reqUrl = params.request?.url || '';
+
+                // Request stage — swap URL
+                if (reqUrl.includes('batchAsyncGenerateVideoText')) {
+                    const newUrl = reqUrl.replace('batchAsyncGenerateVideoText', targetEndpoint);
+                    console.log('[Komfy Video] [CDP-Fetch] URL swap:', reqUrl.substring(reqUrl.lastIndexOf('/') + 1), '→', newUrl.substring(newUrl.lastIndexOf('/') + 1));
+                    chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', {
+                        requestId: params.requestId,
+                        url: newUrl,
+                    }, () => {});
+                } else {
+                    chrome.debugger.sendCommand({ tabId }, 'Fetch.continueRequest', {
+                        requestId: params.requestId,
+                    }, () => {});
+                }
+            };
+            chrome.debugger.onEvent.addListener(cdpFetchListener);
+            await send('Fetch.enable', {
+                patterns: [
+                    { urlPattern: '*aisandbox*batchAsyncGenerateVideoText*', requestStage: 'Request' }
+                ],
+            });
+            console.log('[Komfy Video] [CDP-Fetch] Enabled pure URL swap to: ' + targetEndpoint);
+        }
+
         const submitTimestamp = Date.now(); // Capture TRUOC submit de dung lam temporal gate
+
+        // ★ PRE-SUBMIT: Confirm __komfy_i2vData__ is set before submit
+        if (i2vData) {
+            const i2vVerify = await send('Runtime.evaluate', {
+                expression: `(function(){
+                    var d = window.__komfy_i2vData__;
+                    if (!d) return { set: false };
+                    return {
+                        set: true,
+                        startImage: (d.startImage || 'MISSING').substring(0, 25),
+                        endImage: (d.endImage || 'MISSING').substring(0, 25),
+                        videoModelKey: d.videoModelKey || 'MISSING',
+                    };
+                })()`,
+                returnByValue: true,
+            });
+            const v = i2vVerify?.result?.value;
+            console.log('[Komfy Video] [PRE-SUBMIT I2V CHECK]', JSON.stringify(v));
+            if (!v?.set) {
+                console.error('[Komfy Video] __komfy_i2vData__ is NULL before submit!');
+            }
+        }
+
         await send('Runtime.evaluate', {
             expression: `window.__komfy_genId__ = null; window.__komfy_genSid__ = null; window.__komfy_genIdAt__ = null; window.__komfy_clickTime = Date.now();`,
             awaitPromise: false,
@@ -1061,7 +1196,8 @@ async function generateViaUI(
                 function isExcluded(text) {
                     var t = text.toLowerCase().trim();
                     if (t.startsWith('add_2') || t.startsWith('add_circle') || t === 'add' || t === 'add create' || t === 'add_2create') return true;
-                    if (t === 'close' || t === '\u2715' || t === 'cancel' || t === 'x') return true;
+                    if (t === 'close' || t.startsWith('close') || t === '\u2715' || t === 'cancel' || t === 'x') return true;
+                    if (t.includes('clear prompt') || t.includes('clear_all') || t.includes('delete') || t.includes('remove')) return true;
                     return false;
                 }
                 function getCenter(r) { return { x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2) }; }
@@ -1141,12 +1277,94 @@ async function generateViaUI(
         const submitBtn = submitBtnInfo?.result?.value;
         console.log('[Komfy Video] Submit btn:', JSON.stringify(submitBtn));
 
+        // ★ I2V: content_fetch_interceptor.js injects startImage/endImage vào body.
+        // CDP Fetch swaps URL at Request stage (browser sends with cookies),
+        // then injects CORS headers at Response stage so page can read it.
+
+        // ★ Install fetch counter BEFORE submit — detect if ANY fetch was fired
+        await send('Runtime.evaluate', {
+            expression: `window.__komfy_fetchCount__ = 0; window.__komfy_fetchUrls__ = [];`,
+            awaitPromise: false,
+        });
+
+        // Submit click — try CDP mouse event first, verify, then fallback if needed
+        let submitMethod = 'none';
         if (submitBtn?.found) {
+            // Attempt 1: CDP mouse events
+            await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: submitBtn.x, y: submitBtn.y });
+            await sleep(100);
             await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: submitBtn.x, y: submitBtn.y, button: 'left', clickCount: 1 });
             await sleep(80);
             await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: submitBtn.x, y: submitBtn.y, button: 'left', clickCount: 1 });
-            console.log('[Komfy Video] ✅ Submit clicked via CDP:', submitBtn.method, '| text:', submitBtn.text);
+            submitMethod = 'cdp-mouse';
+            console.log('[Komfy Video] Submit attempt 1 (CDP mouse):', submitBtn.method, '| text:', submitBtn.text);
+
+            // Wait 3s and check if a fetch was fired
+            await sleep(3000);
+            const fetchCheck1 = (await send('Runtime.evaluate', {
+                expression: `JSON.stringify({ count: window.__komfy_fetchCount__ || 0, urls: (window.__komfy_fetchUrls__ || []).slice(0, 5), i2vSwap: !!window.__komfy_i2vSwapDone__ })`,
+                returnByValue: true,
+            }))?.result?.value;
+            const fc1 = typeof fetchCheck1 === 'string' ? JSON.parse(fetchCheck1) : fetchCheck1;
+            console.log('[Komfy Video] [CLICK-CHECK-1] 3s after CDP click:', JSON.stringify(fc1));
+
+            if (!fc1?.count && !fc1?.i2vSwap) {
+                // CDP click didn't trigger fetch → try JS .click()
+                console.warn('[Komfy Video] ⚠️ CDP click did not trigger API call → trying JS click fallback...');
+                const jsClickResult = await send('Runtime.evaluate', {
+                    expression: `(function(){
+                        // Find submit button by coordinates
+                        var el = document.elementFromPoint(${submitBtn.x}, ${submitBtn.y});
+                        if (!el) return 'no-element-at-point';
+                        // Walk up to find clickable parent
+                        var clickTarget = el;
+                        for (var i = 0; i < 5; i++) {
+                            if (clickTarget.tagName === 'BUTTON' || clickTarget.getAttribute('role') === 'button') break;
+                            if (clickTarget.parentElement) clickTarget = clickTarget.parentElement;
+                            else break;
+                        }
+                        // Full PointerEvent + MouseEvent pipeline
+                        var rect = clickTarget.getBoundingClientRect();
+                        var cx = rect.left + rect.width / 2;
+                        var cy = rect.top + rect.height / 2;
+                        var evtOpts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0, buttons: 1, view: window };
+                        clickTarget.dispatchEvent(new PointerEvent('pointerdown', evtOpts));
+                        clickTarget.dispatchEvent(new MouseEvent('mousedown', evtOpts));
+                        clickTarget.dispatchEvent(new PointerEvent('pointerup', evtOpts));
+                        clickTarget.dispatchEvent(new MouseEvent('mouseup', evtOpts));
+                        clickTarget.dispatchEvent(new MouseEvent('click', evtOpts));
+                        return 'js-click:' + clickTarget.tagName + ':' + (clickTarget.textContent||'').trim().substring(0, 25);
+                    })()`,
+                    returnByValue: true,
+                });
+                submitMethod = 'js-click';
+                console.log('[Komfy Video] Submit attempt 2 (JS click):', jsClickResult?.result?.value);
+
+                // Wait 3s and check again
+                await sleep(3000);
+                const fetchCheck2 = (await send('Runtime.evaluate', {
+                    expression: `JSON.stringify({ count: window.__komfy_fetchCount__ || 0, urls: (window.__komfy_fetchUrls__ || []).slice(0, 5), i2vSwap: !!window.__komfy_i2vSwapDone__ })`,
+                    returnByValue: true,
+                }))?.result?.value;
+                const fc2 = typeof fetchCheck2 === 'string' ? JSON.parse(fetchCheck2) : fetchCheck2;
+                console.log('[Komfy Video] [CLICK-CHECK-2] 3s after JS click:', JSON.stringify(fc2));
+
+                if (!fc2?.count && !fc2?.i2vSwap) {
+                    // JS click also didn't work → try Enter key
+                    console.warn('[Komfy Video] ⚠️ JS click also failed → trying Enter key fallback...');
+                    await send('Runtime.evaluate', {
+                        expression: `(function(){ var tb=document.querySelector('[role="textbox"],[contenteditable="true"]'); if(tb) tb.focus(); })()`,
+                        returnByValue: true,
+                    });
+                    await sleep(200);
+                    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 2 });
+                    await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 2 });
+                    submitMethod = 'ctrl-enter';
+                    console.log('[Komfy Video] Submit attempt 3 (Ctrl+Enter)');
+                }
+            }
         } else {
+            // Button not found → Ctrl+Enter fallback
             console.warn('[Komfy Video] ⚠️ Submit btn not found! Fallback Ctrl+Enter. debug:', JSON.stringify(submitBtn?.debugBtns));
             await send('Runtime.evaluate', { expression: `(function(){ var tb=document.querySelector('[role="textbox"],[contenteditable="true"]'); if(tb) tb.focus(); })()`, returnByValue: true });
             await sleep(200);
@@ -1155,10 +1373,57 @@ async function generateViaUI(
             await sleep(500);
             await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
             await send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+            submitMethod = 'ctrl-enter';
+        }
+        console.log('[Komfy Video] ✅ Submit via:', submitMethod);
+
+        await sleep(10000); // Doi page fire fetch + server response
+
+        // ★ POST-SUBMIT: Check API response status (genId, error, i2vData state)
+        const postSubmitCheck = await (async () => {
+            try {
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId }, world: 'MAIN',
+                    func: () => {
+                        return {
+                            genId: window.__komfy_genId__ ? String(window.__komfy_genId__).substring(0, 40) : null,
+                            genSid: window.__komfy_genSid__ ? String(window.__komfy_genSid__).substring(0, 30) : null,
+                            genIdAt: window.__komfy_genIdAt__ || null,
+                            genError: window.__komfy_genError__ || null,
+                            i2vSwapDone: !!window.__komfy_i2vSwapDone__,
+                            i2vDataCleared: window.__komfy_i2vData__ === null || window.__komfy_i2vData__ === undefined,
+                            clickTime: window.__komfy_clickTime || null,
+                            fetchHookActive: !!(window.__komfy_origFetch__ && window.__komfy_intercept__),
+                        };
+                    },
+                });
+                return results?.[0]?.result;
+            } catch (e) {
+                return { error: 'scriptEval failed: ' + e.message };
+            }
+        })();
+        console.log('[Komfy Video] [POST-SUBMIT CHECK]', JSON.stringify(postSubmitCheck));
+        if (postSubmitCheck?.genError) {
+            console.error('[Komfy Video] ⚠️ API returned error after submit:', postSubmitCheck.genError);
+        }
+        if (!postSubmitCheck?.genId) {
+            console.warn('[Komfy Video] ⚠️ No genId captured 15s after submit — API response may still be pending (normal for I2V)');
+        }
+        if (i2vData && !postSubmitCheck?.i2vSwapDone && !postSubmitCheck?.i2vDataCleared) {
+            console.error('[Komfy Video] I2V REBUILD DID NOT FIRE! Interceptor did not rebuild the request.');
+        } else if (i2vData && (postSubmitCheck?.i2vSwapDone || postSubmitCheck?.i2vDataCleared)) {
+            console.log('[Komfy Video] I2V rebuild confirmed (swapDone:', postSubmitCheck?.i2vSwapDone, '| dataCleared:', postSubmitCheck?.i2vDataCleared, ')');
         }
 
-        await sleep(1000);
         console.log('[Komfy Video] ✅ Generation submitted! Polling...');
+
+        // === Cleanup CDP Fetch interception ===
+        if (cdpFetchListener) {
+            try { await send('Fetch.disable'); } catch (e) {}
+            chrome.debugger.onEvent.removeListener(cdpFetchListener);
+            cdpFetchListener = null;
+            console.log('[Komfy Video] [CDP-Fetch] Disabled.');
+        }
 
         // === RELEASE UI MUTEX sau khi submit ===
         releaseMutex();

@@ -28,21 +28,22 @@ importScripts(
     'modules/polling.js'
 );
 
-// ── Initialization ──
-chrome.storage.local.get(['komfyClientId', 'komfyProjectId'], (res) => {
+// -- Initialization --
+chrome.storage.local.get(['komfyClientId', 'komfySingleProjectId'], (res) => {
     if (res.komfyClientId) {
         sessionData.clientId = res.komfyClientId;
     } else {
         sessionData.clientId = 'ext_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
         chrome.storage.local.set({ komfyClientId: sessionData.clientId });
     }
-    if (res.komfyProjectId) {
-        sessionData.projectId = res.komfyProjectId;
-        console.log('[Komfy] Restored cached projectId:', res.komfyProjectId.substring(0, 16) + '...');
+    if (res.komfySingleProjectId) {
+        sessionData.projectId = res.komfySingleProjectId;
+        console.log('[Komfy] Restored cached projectId:', res.komfySingleProjectId.substring(0, 16) + '...');
     }
     sendToProxy().catch(() => {});
     setInterval(() => { sendToProxy().catch(() => {}); }, 5000);
 });
+
 
 // ── Auto-inject content scripts ──
 async function injectContentScriptsIntoFlowTabs() {
