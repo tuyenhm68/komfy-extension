@@ -709,8 +709,11 @@ async function retryVideoAfterStaleIds(tab, apiBody, body, endpoint, headers) {
     } else {
         delete apiBody.requests[0].referenceImages;
         apiBody.requests[0].videoModelKey = toT2VModelKey(apiBody.requests[0].videoModelKey);
-        retryUrl = FLOW_API_BASE + endpoint;
-        console.log('[Komfy Direct] Retrying as T2V (no refs)');
+        let actualEndpoint = endpoint.startsWith('/video:') ? endpoint.split(':').pop() : endpoint;
+
+        retryUrl = FLOW_API_BASE + '/video:' + actualEndpoint;
+        
+        console.log('[Komfy Direct] Retrying as T2V (no refs) | url:', retryUrl);
     }
 
     await humanDelay(1000, 2500);
@@ -724,6 +727,61 @@ async function retryVideoAfterStaleIds(tab, apiBody, body, endpoint, headers) {
         throw new Error('DIRECT_API_FAILED:retry-no-mediaId');
     }
     console.log('[Komfy Direct] ✅ Retry success!');
+    return retryRes;
+}
+
+/** Retry I2V API khi 404/400 (stale mediaIds) bang cach re-upload frames */
+async function retryI2VAfterStaleIds(tab, apiBody, body, endpoint, headers) {
+    console.log('[Komfy Direct] I2V Stale mediaIds → retrying by re-uploading frames...');
+    
+    // Upload startFrame
+    if (body.startFrameDataUrl) {
+        console.log('[Komfy Direct] Re-uploading startFrame...');
+        const freshStartId = await uploadFrameImage(body.startFrameDataUrl);
+        if (freshStartId) {
+            console.log('[Komfy Direct] ✅ Re-uploaded startFrame, new mediaId:', freshStartId);
+            apiBody.requests[0].startImage = {
+                ...apiBody.requests[0].startImage,
+                mediaId: freshStartId
+            };
+        } else {
+            console.warn('[Komfy Direct] ⚠️ Failed to re-upload startFrame');
+        }
+    }
+    
+    // Upload endFrame 
+    if (body.endFrameDataUrl) {
+        console.log('[Komfy Direct] Re-uploading endFrame...');
+        const freshEndId = await uploadFrameImage(body.endFrameDataUrl);
+        if (freshEndId) {
+            console.log('[Komfy Direct] ✅ Re-uploaded endFrame, new mediaId:', freshEndId);
+            apiBody.requests[0].endImage = {
+                ...apiBody.requests[0].endImage,
+                mediaId: freshEndId
+            };
+        } else {
+            console.warn('[Komfy Direct] ⚠️ Failed to re-upload endFrame');
+        }
+    }
+
+    const freshToken = await refreshRecaptcha(tab.id, 'video_generation');
+    if (freshToken) apiBody.clientContext.recaptchaContext.token = freshToken;
+
+    let actualEndpoint = endpoint.startsWith('/video:') ? endpoint.split(':').pop() : endpoint;
+
+    const retryUrl = FLOW_API_BASE + '/video:' + actualEndpoint;
+
+    await humanDelay(1000, 2500);
+    const retryRes = await callApiFromPage(tab.id, retryUrl, JSON.stringify(apiBody), headers);
+    if (!retryRes.ok) {
+        throw new Error('DIRECT_API_FAILED:' + retryRes.status + ':' + (retryRes.error || retryRes.body?.substring(0, 100) || 'retry-failed'));
+    }
+
+    const retryData = JSON.parse(retryRes.body);
+    if (!extractVideoMediaId(retryData)) {
+        throw new Error('DIRECT_API_FAILED:retry-no-mediaId');
+    }
+    console.log('[Komfy Direct] ✅ I2V Retry success!');
     return retryRes;
 }
 
@@ -807,8 +865,16 @@ async function directGenerateVideo(task) {
 
     // Apply ingredient images (may change endpoint)
     const ingredientEndpoint = applyIngredientImages(apiBody, body);
-    const actualEndpoint = ingredientEndpoint || endpoint;
-    const url = FLOW_API_BASE + actualEndpoint;
+    let actualEndpoint = ingredientEndpoint || endpoint;
+    // Removed mapping: komfy endpoints like StartAndEndImage are real Google Flow endpoints.
+
+
+    // Ensure we don't duplicate '/video:' if actualEndpoint already has it
+    if (actualEndpoint.startsWith('/video:')) {
+        actualEndpoint = actualEndpoint.split(':').pop();
+    }
+
+    const url = FLOW_API_BASE + '/video:' + actualEndpoint;
 
     console.log('[Komfy Direct] FULL URL:', url);
     console.log('[Komfy Direct] FULL BODY (truncated):', JSON.stringify(apiBody).substring(0, 600));
@@ -836,9 +902,15 @@ async function directGenerateVideo(task) {
     if (!response.ok) {
         console.warn('[Komfy Direct] Video API failed:', response.status, '| body:', response.body?.substring(0, 500));
 
-        // 404 + stale mediaIds → retry
-        if (response.status === 404 && (body.referenceMediaIds || []).length > 0) {
-            response = await retryVideoAfterStaleIds(tab, apiBody, body, endpoint, headers);
+        // 404/400 + stale mediaIds → retry
+        if (response.status === 404 || response.status === 400) {
+            if ((body.referenceMediaIds || []).length > 0) {
+                response = await retryVideoAfterStaleIds(tab, apiBody, body, endpoint, headers);
+            } else if (body.startFrameDataUrl || body.endFrameDataUrl) {
+                response = await retryI2VAfterStaleIds(tab, apiBody, body, endpoint, headers);
+            } else {
+                throw new Error('DIRECT_API_FAILED:' + response.status + ':' + (response.error || response.body?.substring(0, 100) || 'unknown'));
+            }
         } else {
             throw new Error('DIRECT_API_FAILED:' + response.status + ':' + (response.error || response.body?.substring(0, 100) || 'unknown'));
         }
