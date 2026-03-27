@@ -799,31 +799,32 @@ async function pollVideoStatus(tabId, mediaId, projectId, headers) {
         }
 
         const pollData = JSON.parse(pollRes.body);
-        const media = pollData?.media?.[0];
+        const media = pollData?.media?.[0] || pollData;
         const status = media?.mediaMetadata?.mediaStatus?.mediaGenerationStatus
-            || media?.status || pollData?.operations?.[0]?.status || 'UNKNOWN';
+            || pollData?.operations?.[0]?.status || media?.status || 'UNKNOWN';
         const elapsed = ((Date.now() - pollStart) / 1000).toFixed(0);
 
         // Verbose logging first poll
         if (elapsed <= 15) {
             console.log('[Komfy Direct] Poll detail:', media ? JSON.stringify(media).substring(0, 400) : 'N/A');
         }
-        console.log('[Komfy Direct] Poll:', status, '|', elapsed + 's');
+        console.log('[Komfy Direct] Poll status:', status, '| elapsed:', elapsed + 's');
 
-        // Success
-        if (status.includes('COMPLETE') || status.includes('SUCCESS')) {
-            const videoUrl = extractVideoUrl(media);
+        const videoUrl = extractVideoUrl(media);
+
+        // Success condition: Explicitly COMPLETE or a valid video URL is extracted
+        if (status.includes('COMPLETE') || status === 'DONE' || videoUrl) {
             console.log('[Komfy Direct] Video DONE! url:', videoUrl ? videoUrl.substring(0, 100) : 'none');
 
             if (videoUrl) {
                 return successResult({ generationId: 'DIRECT:' + videoUrl, method: 'direct-api' });
             }
             // No URL → download.js se dung getMedia strategy
-            console.log('[Komfy Direct] No video URL → returning mediaId for download strategy');
+            console.log('[Komfy Direct] No video URL returned, but status is COMPLETE → returning mediaId for download strategy');
             return successResult({ generationId: mediaId, method: 'direct-api' });
         }
 
-        // Failed
+        // Failed condition
         if (status.includes('FAIL') || status.includes('ERROR') || status.includes('CANCEL')) {
             const errMsg = media?.mediaMetadata?.mediaStatus?.error?.message
                 || media?.mediaMetadata?.mediaStatus?.failureReasons?.[0]
