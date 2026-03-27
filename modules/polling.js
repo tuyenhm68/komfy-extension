@@ -152,7 +152,7 @@ async function processTask(task) {
                     },
                     imageBytes: imageBytes,
                     isUserUploaded: true,
-                    isHidden: true,
+                    isHidden: false,
                     mimeType: 'image/jpeg',
                     fileName: 'komfy_ingredient.jpg'
                 });
@@ -180,13 +180,12 @@ async function processTask(task) {
                 // Human-like pause before upload (simulate user selecting file)
                 await humanDelay(600, 1500);
 
-
                 let uploadRes = await fetch(FLOW_API + '/flow/uploadImage', {
                     method: 'POST',
                     headers: {
                         'authorization': sessionData.bearerToken || '',
                         'x-browser-validation': sessionData.xbv || '',
-                        'content-type': 'text/plain;charset=UTF-8',
+                        'content-type': 'application/json',
                         'accept': '*/*',
                         'origin': 'https://labs.google',
                         'referer': 'https://labs.google/',
@@ -228,7 +227,7 @@ async function processTask(task) {
                         headers: {
                             'authorization': sessionData.bearerToken || '',
                             'x-browser-validation': sessionData.xbv || '',
-                            'content-type': 'text/plain;charset=UTF-8',
+                            'content-type': 'application/json',
                             'accept': '*/*',
                             'origin': 'https://labs.google',
                             'referer': 'https://labs.google/',
