@@ -1,115 +1,89 @@
-// Project management: create & rename projects on Google Flow.
+// Project management — Extension Shell
+// ★ Core IP (createProject, updateProject) runs in Electron via /api/internal/flow-action
+// Extension only handles: tab navigation (Chrome APIs) + UI fallback
+
+const FLOW_ACTION_URL = 'http://127.0.0.1:3120/api/internal/flow-action';
+
+/**
+ * Helper: Delegate một action sang Electron FlowBroker.
+ * Electron sẽ dùng bearer token đã lưu để gọi trực tiếp Google API.
+ */
+async function callFlowAction(action, params) {
+    const cfg = await loadFlowConfig();
+    const res = await fetch(FLOW_ACTION_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action, config: cfg, params })
+    }).catch(e => ({ ok: false, _fetchError: e.message }));
+
+    if (res._fetchError) {
+        return { ok: false, error: 'Electron not running: ' + res._fetchError };
+    }
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        return { ok: false, error: `HTTP ${res.status}: ${txt.substring(0, 200)}` };
+    }
+    return res.json().catch(() => ({ ok: false, error: 'Invalid JSON response' }));
+}
 
 /**
  * Tao project moi tren Google Flow va dat ten.
- * Flow 1: Click nut "+ Dự án mới" tren home page
- * Flow 2: Doi project page load → rename title thanh projectName
+ * STRATEGY:
+ *   Fast Path: Electron tạo project qua tRPC (core IP bảo vệ) → navigate → Electron rename
+ *   Fallback : Click nut "New Project" → cho navigate → Electron rename
  *
  * @param {number} tabId - Tab ID dang o trang home Flow
- * @param {string} projectName - Ten project can dat (vd: "komfy-studio")
+ * @param {string} projectName - Ten project can dat (vd: "[KS] Komfy Studio")
  */
 async function createAndRenameProject(tabId, projectName) {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // --- Đột phá: Tạo project trực tiếp bằng tRPC API (Không qua UI) ---
-    console.log('[Komfy] Đang thử tạo project trực tiếp qua tRPC API thay vì UI...');
-    const apiCreateResult = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: async (pName) => {
-            try {
-                const endpoints = [
-                    { url: '/fx/api/trpc/project.createProject', body: { json: { projectTitle: pName, toolName: 'PINHOLE' } } },
-                    { url: '/fx/api/trpc/project.createProject?batch=1', body: { '0': { json: { projectTitle: pName, toolName: 'PINHOLE' } } } },
-                    { url: '/fx/api/trpc/project.create', body: { json: { title: pName, toolName: 'PINHOLE' } } },
-                    { url: '/fx/api/trpc/project.create?batch=1', body: { '0': { json: { title: pName, toolName: 'PINHOLE' } } } }
-                ];
-                for (const ep of endpoints) {
-                    try {
-                        const res = await fetch(ep.url, {
-                            method: 'POST',
-                            headers: { 'content-type': 'application/json' },
-                            credentials: 'include',
-                            body: JSON.stringify(ep.body)
-                        });
-                        if (res.ok) {
-                            const data = await res.json();
-                            let pid = null;
-                            // Extract ID tu parseResult (non-batch vs batch)
-                            if (Array.isArray(data)) {
-                                pid = data[0]?.result?.data?.json?.project?.id || data[0]?.result?.data?.json?.id;
-                            } else {
-                                pid = data?.result?.data?.json?.project?.id || data?.result?.data?.json?.id;
-                            }
-                            if (pid) {
-                                return { ok: true, projectId: pid };
-                            }
-                        }
-                    } catch (err) {}
-                }
-                return { ok: false, reason: 'All endpoints failed or returned no ID' };
-            } catch (e) {
-                return { ok: false, error: e.message };
-            }
-        },
-        args: [projectName]
-    }).catch(e => [{ result: { ok: false, error: e.message } }]);
+    // === FAST PATH: Electron tạo project (core IP nằm trong ASAR) ===
+    console.log('[Komfy] Delegate createProject → Electron FlowBroker...');
+    const createResult = await callFlowAction('createProject', {});
 
-    const apiResult = apiCreateResult?.[0]?.result;
-    if (apiResult?.ok && apiResult?.projectId) {
-        console.log('[Komfy] ✅ Project tạo qua API thành công:', apiResult.projectId);
-        
-        // Cập nhật tab sang project URL
-        const newUrl = 'https://labs.google/fx/tools/flow/project/' + apiResult.projectId;
+    if (createResult?.ok && createResult?.projectId) {
+        const projectId = createResult.projectId;
+        console.log('[Komfy] ✅ Electron tao project thanh cong:', projectId);
+
+        // Navigate tab → Extension vẫn giữ phần Chrome API (không thể di chuyển)
+        const newUrl = 'https://labs.google/fx/tools/flow/project/' + projectId;
         await chrome.tabs.update(tabId, { url: newUrl });
-        
-        // Chờ tab tải xong hoàn thành SPA logic (quan trọng để Flow load session project mới)
         await waitForTabLoad(tabId, 15000).catch(() => {});
         await sleep(2000);
-        
-        // Google Flow's createProject API might ignore title and auto-generate "Mar 27..."
-        // Force an immediate explicit API rename to fix the title.
-        try {
-            console.log('[Komfy] Thực hiện rename ép khung ngay sau khi CreateAPI...');
-            await renameProjectOnFlow(projectName, apiResult.projectId);
-        } catch (renameErr) {
-            console.warn('[Komfy] Loi khi rename ép khung:', renameErr.message);
+
+        // Electron rename (core IP bảo vệ)
+        const renameResult = await callFlowAction('updateProject', { projectId, projectTitle: projectName });
+        if (renameResult?.ok) {
+            console.log('[Komfy] ✅ Electron doi ten project thanh cong');
+        } else {
+            console.warn('[Komfy] ⚠️ Electron rename that bai:', renameResult?.error);
         }
 
-        // Lưu local config sessionData và extension storage
-        const currentBackgroundData = await chrome.storage.local.get(['komfyProjectMap']).catch(() => ({}));
-        const updatedMap = currentBackgroundData.komfyProjectMap || {};
-        updatedMap[projectName] = apiResult.projectId;
-        // ★ QUAN TRỌNG: Lưu vào komfySingleProjectId để ensureFlowTab không chạy lại slow path
-        await chrome.storage.local.set({ 
-            komfyProjectMap: updatedMap,
-            komfySingleProjectId: apiResult.projectId
-        });
-        sessionData.projectId = apiResult.projectId;
-        console.log('[Komfy] ✅ Đã cache komfySingleProjectId:', apiResult.projectId.substring(0, 16) + '...');
-
-        return; // Thành công API -> Thoát khỏi hàm, tránh chạy luồng UI click.
-    } else {
-        console.warn('[Komfy] ⚠️ Tạo project bằng API thất bại, fallback sang UI Click. Lý do:', JSON.stringify(apiResult));
+        // Cache
+        await chrome.storage.local.set({ komfySingleProjectId: projectId });
+        sessionData.projectId = projectId;
+        console.log('[Komfy] ✅ Cached komfySingleProjectId:', projectId.substring(0, 16) + '...');
+        return; // Done
     }
 
-    // --- Buoc 1: Click nut "Dự án mới" / "New project" ---
-    // Human-like pause before clicking (simulate user looking for button)
+    console.warn('[Komfy] ⚠️ Electron createProject that bai:', createResult?.error, '→ fallback UI Click');
+
+    // === FALLBACK: Click nut "New Project" tren home page ===
+    const cfg = await loadFlowConfig();
     await humanDelay(1000, 2500);
-    console.log('[Komfy] Tim nut "Dự án mới" / "New project"...');
+    console.log('[Komfy] Tim nut "Du an moi" / "New project"...');
     const clickResult = await chrome.scripting.executeScript({
         target: { tabId },
-        func: () => {
-            // Keywords cho ca tieng Viet va tieng Anh
-            const keywords = ['dự án mới', 'new project', 'tạo dự án', 'create project', 'new flow'];
-
-            // Tim tat ca interactive elements (button, a, div voi role, ...)
+        func: (selectorCfg) => {
+            const keywords = selectorCfg.keywords || ['du an moi', 'new project', 'tao du an', 'create project'];
+            const maxLen = selectorCfg.maxTextLength || 40;
             const candidates = [...document.querySelectorAll('button, a, [role="button"], [tabindex]')];
-            
-            // Strategy 1: Tim theo textContent
+
+            // Strategy 1: textContent
             for (const el of candidates) {
                 const text = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-                // Chỉ lấy button có chuỗi text ngắnn (tránh click nhầm vào đoạn văn bản chứa từ khoá)
-                if (text.length > 0 && text.length < 40) {
+                if (text.length > 0 && text.length < maxLen) {
                     for (const kw of keywords) {
                         if (text.includes(kw)) {
                             el.click();
@@ -119,31 +93,24 @@ async function createAndRenameProject(tabId, projectName) {
                 }
             }
 
-            // Strategy 2: Tim theo aria-label
+            // Strategy 2: aria-label
             for (const el of candidates) {
                 const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                if (label.length > 0 && label.length < 50) {
+                if (label.length > 0 && label.length < maxLen) {
                     for (const kw of keywords) {
                         if (label.includes(kw)) {
                             el.click();
                             return { clicked: true, text: label, strategy: 'aria-label' };
                         }
                     }
-                    // Them keywords chung
-                    if (label.includes('new ') || label.includes('create ') || label.includes('mới') || label.includes('tạo')) {
-                        el.click();
-                        return { clicked: true, text: label, strategy: 'aria-label-generic' };
-                    }
                 }
             }
 
-            // Strategy 3: Tim tat ca elements (ke ca div, span) co text khop
-            const allEls = [...document.querySelectorAll('*')];
-            for (const el of allEls) {
+            // Strategy 3: any small element
+            for (const el of [...document.querySelectorAll('*')]) {
                 const text = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
                 const r = el.getBoundingClientRect();
-                // Chi lay cac phan tu nho (button-like), khong phai container lon, và độ dài text ngắn
-                if (r.width > 0 && r.width < 300 && r.height > 20 && r.height < 100 && text.length > 0 && text.length < 50) {
+                if (r.width > 0 && r.width < 300 && r.height > 20 && r.height < 100 && text.length > 0 && text.length < maxLen) {
                     for (const kw of keywords) {
                         if (text.includes(kw)) {
                             el.click();
@@ -153,350 +120,64 @@ async function createAndRenameProject(tabId, projectName) {
                 }
             }
 
-            // Debug: log cac button tim thay de diagnose
             const debugBtns = candidates.slice(0, 15).map(b => ({
                 tag: b.tagName,
                 text: (b.textContent || '').trim().substring(0, 40),
                 label: b.getAttribute('aria-label'),
             }));
             return { clicked: false, debug: debugBtns };
-        }
+        },
+        args: [cfg.selectors.newProject]
     }).catch(e => [{ result: { clicked: false, error: e.message } }]);
 
     const wasClicked = clickResult?.[0]?.result?.clicked;
     if (!wasClicked) {
         const debugInfo = clickResult?.[0]?.result?.debug || clickResult?.[0]?.result?.error || 'no debug info';
         console.error('[Komfy] ⚠ Khong tim thay nut tao project! Debug:', JSON.stringify(debugInfo));
-        throw new Error('Khong tim thay nut "Dự án mới" / "New project" tren trang Flow. Vui long tao project thu cong.');
+        throw new Error('Khong tim thay nut "Du an moi" / "New project" tren trang Flow. Vui long tao project thu cong.');
     }
     console.log('[Komfy] Da click nut tao project moi:', clickResult[0].result.text, '(strategy:', clickResult[0].result.strategy + ')');
 
-    // --- Buoc 2: Doi project page load (URL se chuyen sang /project/{id}) ---
     await waitForTabLoad(tabId, 20000).catch(e => console.warn('[Komfy]', e.message));
-    await sleep(3000); // Cho SPA render xong
-
-    // Inject scripts vao project page moi
+    await sleep(3000);
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content_main.js'], world: 'MAIN' }).catch(() => {});
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content_isolated.js'], world: 'ISOLATED' }).catch(() => {});
 
-    // Xac nhan da navigate thanh cong
     const currentTab = await chrome.tabs.get(tabId).catch(() => null);
     const currentUrl = currentTab?.url || '';
     if (!currentUrl.includes('/project/')) {
-        console.warn('[Komfy] ⚠ Khong navigate duoc toi project page. URL hien tai:', currentUrl);
+        console.warn('[Komfy] ⚠ Khong navigate duoc toi project page. URL:', currentUrl);
         throw new Error('Khong tao duoc project moi. Vui long thu lai.');
     }
     console.log('[Komfy] Project moi da tao, URL:', currentUrl);
 
-    // --- Buoc 3: Dat ten project bang CDP ---
-    console.log('[Komfy] Dat ten project thanh "' + projectName + '"...');
-    try {
-        await chrome.debugger.attach({ tabId }, '1.3');
-
-        const send = (method, params) => new Promise((res, rej) => {
-            chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
-                if (chrome.runtime.lastError) rej(new Error(chrome.runtime.lastError.message));
-                else res(result);
-            });
-        });
-
-        // Tim input title tren header (input co ten project hien tai, vd: "Mar 16 - 04:21")
-        const titleResult = await send('Runtime.evaluate', {
-            expression: `(function(){
-                // Tim input trong header area
-                var inputs = document.querySelectorAll('input');
-                for (var i = 0; i < inputs.length; i++) {
-                    var inp = inputs[i];
-                    var r = inp.getBoundingClientRect();
-                    // Title input thuong nam o top-left, nho va nam trong header
-                    if (r.top < 80 && r.width > 50 && r.width < 500) {
-                        return { x: r.left + r.width / 2, y: r.top + r.height / 2, found: true, value: inp.value };
-                    }
-                }
-                // Fallback: Tim button hoac span co text giong title project
-                var spans = document.querySelectorAll('button, span, div');
-                for (var j = 0; j < spans.length; j++) {
-                    var el = spans[j];
-                    var r2 = el.getBoundingClientRect();
-                    // Phan tu nam o header, nho, co text
-                    if (r2.top < 80 && r2.left < 400 && r2.left > 30 && r2.width > 40 && el.textContent.trim().length > 3 && el.textContent.trim().length < 50) {
-                        return { x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, found: true, value: el.textContent.trim(), isSpan: true };
-                    }
-                }
-                return { found: false };
-            })()`,
-            returnByValue: true,
-            awaitPromise: false,
-        });
-
-        const titleInfo = titleResult?.result?.value;
-        if (!titleInfo || !titleInfo.found) {
-            console.warn('[Komfy] Khong tim thay title input. Project se giu ten mac dinh.');
+    // Rename qua Electron (fallback path vẫn dùng Electron để rename)
+    const newProjectIdMatch = currentUrl.match(/\/project\/([a-zA-Z0-9_-]+)/);
+    const newProjectId = newProjectIdMatch ? newProjectIdMatch[1] : null;
+    if (newProjectId) {
+        const renameResult = await callFlowAction('updateProject', { projectId: newProjectId, projectTitle: projectName });
+        if (renameResult?.ok) {
+            console.log('[Komfy] ✅ Electron doi ten project (fallback) thanh cong');
         } else {
-            console.log('[Komfy] Tim thay title:', titleInfo.value, 'isSpan:', !!titleInfo.isSpan);
-
-            // Click vao title de focus/mo che do edit (human-like click timing)
-            await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: titleInfo.x, y: titleInfo.y, button: 'left', clickCount: 1 });
-            await humanDelay(60, 150); // realistic mouse button hold time
-            await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: titleInfo.x, y: titleInfo.y, button: 'left', clickCount: 1 });
-            await humanDelay(400, 800);
-
-            // Neu la span/button, click lan nua co the mo input mode
-            if (titleInfo.isSpan) {
-                await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: titleInfo.x, y: titleInfo.y, button: 'left', clickCount: 1 });
-                await humanDelay(60, 150);
-                await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: titleInfo.x, y: titleInfo.y, button: 'left', clickCount: 1 });
-                await humanDelay(400, 800);
-            }
-
-            // Re-find input element (co the da xuat hien sau khi click span)
-            const inputRefind = await send('Runtime.evaluate', {
-                expression: `(function(){
-                    var inputs = document.querySelectorAll('input');
-                    for (var i = 0; i < inputs.length; i++) {
-                        var inp = inputs[i];
-                        var r = inp.getBoundingClientRect();
-                        if (r.top < 80 && r.width > 50 && r.width < 500) {
-                            // Focus vao input
-                            inp.focus();
-                            inp.select();
-                            return { x: r.left + r.width / 2, y: r.top + r.height / 2, found: true, value: inp.value, isInput: true };
-                        }
-                    }
-                    return { found: false };
-                })()`,
-                returnByValue: true,
-                awaitPromise: false,
-            });
-            const inputInfo = inputRefind?.result?.value;
-            const editTarget = (inputInfo && inputInfo.found) ? inputInfo : titleInfo;
-            if (inputInfo && inputInfo.found) {
-                console.log('[Komfy] Re-found input element, value:', inputInfo.value);
-            }
-
-            // SET VALUE VIA REACT-COMPATIBLE METHOD
-            // React controlled inputs ignore native insertText — must use
-            // Object.getOwnPropertyDescriptor to set value and dispatch 'input' event
-            const setResult = await send('Runtime.evaluate', {
-                expression: `(function(newName){
-                    var inputs = document.querySelectorAll('input');
-                    for (var i = 0; i < inputs.length; i++) {
-                        var inp = inputs[i];
-                        var r = inp.getBoundingClientRect();
-                        if (r.top < 80 && r.width > 50 && r.width < 500) {
-                            inp.focus();
-                            // React overrides input.value setter — use native setter to bypass
-                            var nativeSetter = Object.getOwnPropertyDescriptor(
-                                window.HTMLInputElement.prototype, 'value'
-                            ).set;
-                            nativeSetter.call(inp, newName);
-                            // Dispatch events that React listens to
-                            inp.dispatchEvent(new Event('input', { bubbles: true }));
-                            inp.dispatchEvent(new Event('change', { bubbles: true }));
-                            return { ok: true, value: inp.value };
-                        }
-                    }
-                    return { ok: false, reason: 'no input found' };
-                })(${JSON.stringify(projectName)})`,
-                returnByValue: true,
-                awaitPromise: false,
-            });
-            console.log('[Komfy] React setValue result:', JSON.stringify(setResult?.result?.value));
-            await sleep(300);
-
-            // Enter to confirm + blur to trigger save
-            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
-            await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
-            await sleep(300);
-
-            // Click outside to blur
-            await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 500, y: 400, button: 'left', clickCount: 1 });
-            await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 500, y: 400, button: 'left', clickCount: 1 });
-            await sleep(500);
-
-            // Verify: check if title was saved
-            const verifyResult = await send('Runtime.evaluate', {
-                expression: `(function(){
-                    // Check input first
-                    var inputs = document.querySelectorAll('input');
-                    for (var i = 0; i < inputs.length; i++) {
-                        var r = inputs[i].getBoundingClientRect();
-                        if (r.top < 80 && r.width > 50 && r.width < 500)
-                            return { source: 'input', value: inputs[i].value };
-                    }
-                    // Check header text (title may have reverted to span after blur)
-                    var spans = document.querySelectorAll('button, span, div');
-                    for (var j = 0; j < spans.length; j++) {
-                        var el = spans[j];
-                        var r2 = el.getBoundingClientRect();
-                        if (r2.top < 80 && r2.left < 400 && r2.left > 30 && r2.width > 40 && el.textContent.trim().length > 3 && el.textContent.trim().length < 50)
-                            return { source: 'span', value: el.textContent.trim() };
-                    }
-                    return { source: 'none' };
-                })()`,
-                returnByValue: true,
-                awaitPromise: false,
-            });
-            const verified = verifyResult?.result?.value;
-            console.log('[Komfy] Title verify after save:', JSON.stringify(verified));
-
-            // FALLBACK: If React setter didn't work, try tRPC API rename
-            const titleMismatch = !verified || !verified.value || !verified.value.includes(projectName);
-            if (titleMismatch) {
-                console.log('[Komfy] Title mismatch after React setter, trying tRPC API rename...');
-                const pidMatch = (await chrome.tabs.get(tabId).catch(() => ({ url: '' }))).url?.match(/\/project\/([a-zA-Z0-9_-]+)/);
-                if (pidMatch) {
-                    // Try multiple tRPC endpoint patterns (Flow may use different names)
-                    const renameResult = await send('Runtime.evaluate', {
-                        expression: `(async function(pid, newName){
-                            var endpoints = [
-                                'project.updateProjectTitle',
-                                'project.renameProject',
-                                'project.updateProject',
-                                'project.update',
-                                'project.setTitle'
-                            ];
-                            var payloads = [
-                                { '0': { json: { projectId: pid, title: newName } } },
-                                { '0': { json: { projectId: pid, name: newName } } },
-                                { '0': { json: { id: pid, title: newName } } },
-                                { '0': { json: { id: pid, name: newName } } },
-                            ];
-                            for (var ep of endpoints) {
-                                for (var payload of payloads) {
-                                    try {
-                                        var res = await fetch('/fx/api/trpc/' + ep + '?batch=1', {
-                                            method: 'POST',
-                                            headers: { 'content-type': 'application/json' },
-                                            credentials: 'include',
-                                            body: JSON.stringify(payload)
-                                        });
-                                        if (res.ok) {
-                                            var text = await res.text();
-                                            return { ok: true, endpoint: ep, status: res.status, body: text.substring(0, 300) };
-                                        }
-                                    } catch(e) {}
-                                }
-                            }
-                            return { ok: false, error: 'All tRPC endpoints failed' };
-                        })(${JSON.stringify(pidMatch[1])}, ${JSON.stringify(projectName)})`,
-                        returnByValue: true,
-                        awaitPromise: true,
-                    });
-                    console.log('[Komfy] tRPC rename result:', JSON.stringify(renameResult?.result?.value));
-
-                    // If tRPC also failed, try CDP keyboard approach as last resort
-                    if (!renameResult?.result?.value?.ok) {
-                        console.log('[Komfy] tRPC failed, trying CDP keyboard approach...');
-                        // Click on title to enter edit mode
-                        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: editTarget.x, y: editTarget.y, button: 'left', clickCount: 3 });
-                        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: editTarget.x, y: editTarget.y, button: 'left', clickCount: 3 });
-                        await sleep(300);
-                        // Ctrl+A to select all
-                        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2 });
-                        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2 });
-                        await sleep(100);
-                        // Delete selected text
-                        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' });
-                        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace' });
-                        await sleep(100);
-                        // Type character by character with human-like typing speed
-                        for (const ch of projectName) {
-                            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ch });
-                            await send('Input.dispatchKeyEvent', { type: 'char', text: ch });
-                            await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch });
-                            // 50-180ms per char (realistic typing speed ~60-100 WPM)
-                            await new Promise(r => setTimeout(r, 50 + Math.random() * 130));
-                        }
-                        await sleep(300);
-                        // Enter + blur
-                        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
-                        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
-                        await sleep(200);
-                        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 500, y: 400, button: 'left', clickCount: 1 });
-                        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 500, y: 400, button: 'left', clickCount: 1 });
-                        await sleep(500);
-                        console.log('[Komfy] CDP keyboard rename completed');
-                    }
-                }
-            }
-
-            console.log('[Komfy] ✅ Da dat ten project thanh "' + projectName + '"');
+            console.warn('[Komfy] ⚠️ Electron rename (fallback) that bai:', renameResult?.error);
         }
-    } catch (e) {
-        console.warn('[Komfy] Loi khi dat ten project:', e.message);
-        // Khong throw - project da duoc tao, chi la chua doi ten
-    } finally {
-        chrome.debugger.detach({ tabId }).catch(() => {});
-    }
-
-    // --- Buoc 4: Lay projectId tu URL va cache ---
-    const finalTab = await chrome.tabs.get(tabId).catch(() => null);
-    const finalUrl = finalTab?.url || '';
-    const projectIdMatch = finalUrl.match(/\/project\/([a-zA-Z0-9_-]+)/);
-    if (projectIdMatch) {
-        const newProjectId = projectIdMatch[1];
         sessionData.projectId = newProjectId;
-        // Cap nhat komfyProjectMap (de lan sau navigate truc tiep khong can scan home page)
-        const updatedMap = (await new Promise(r => chrome.storage.local.get(['komfyProjectMap'], r))).komfyProjectMap || {};
-        updatedMap[projectName] = newProjectId;
-        await chrome.storage.local.set({ komfyProjectMap: updatedMap });
-        console.log('[Komfy] ✅ Cached projectId cho "' + projectName + '":', newProjectId.substring(0, 16) + '...');
+        await chrome.storage.local.set({ komfySingleProjectId: newProjectId });
+        console.log('[Komfy] ✅ Cached komfySingleProjectId:', newProjectId.substring(0, 16) + '...');
     }
 }
 
 /**
- * Rename an existing project on Google Flow via direct tRPC API.
- * Uses confirmed payload format from project.updateProject.
- *
- * @param {string} newName - New project name (e.g. "[KS] Komfy Studio")
+ * Rename một project qua Electron FlowBroker (thin wrapper, logic ở Electron).
+ * @param {string} newName   - New project name
  * @param {string} projectId - Project UUID
  */
 async function renameProjectOnFlow(newName, projectId) {
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
-    const tab = await findFlowTab();
-    if (!tab) throw new Error('No Flow tab found');
-    const tabId = tab.id;
-
-    console.log('[Komfy] Đổi tên project "' + projectId.substring(0, 12) + '..." thành "' + newName + '" qua tRPC API...');
-
-    // Inject vào tab context để có đầy đủ cookies/session
-    const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: async (pid, title) => {
-            try {
-                // ★ Exact payload format from captured logs
-                const payload = {
-                    '0': {
-                        json: {
-                            projectId: pid,
-                            toolName: 'PINHOLE',
-                            projectInfo: { projectTitle: title },
-                            updateMasks: ['projectTitle']
-                        }
-                    }
-                };
-                const res = await fetch('/fx/api/trpc/project.updateProject?batch=1', {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    credentials: 'include',
-                    body: JSON.stringify(payload)
-                });
-                const text = await res.text();
-                return { ok: res.ok, status: res.status, body: text.substring(0, 300) };
-            } catch (e) {
-                return { ok: false, error: e.message };
-            }
-        },
-        args: [projectId, newName]
-    }).catch(e => [{ result: { ok: false, error: e.message } }]);
-
-    const result = results?.[0]?.result;
+    console.log('[Komfy] Delegate updateProject → Electron FlowBroker...');
+    const result = await callFlowAction('updateProject', { projectId, projectTitle: newName });
     if (result?.ok) {
-        console.log('[Komfy] ✅ Project renamed via project.updateProject API');
-        return;
+        console.log('[Komfy] ✅ Project renamed via Electron');
+    } else {
+        console.warn('[Komfy] ⚠️ Electron rename that bai:', result?.error);
     }
-
-    console.warn('[Komfy] ⚠️ project.updateProject thất bại (status:', result?.status, '). Body:', result?.body || result?.error);
-    // Không throw - project đã tồn tại, sẽ tiếp tục dùng project này dù tên chưa đúng
 }

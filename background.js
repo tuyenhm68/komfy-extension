@@ -22,11 +22,12 @@ importScripts(
     'modules/video-gen-frames.js',
     'modules/video-gen-poll.js',
     'modules/video-gen.js',
-    'modules/image-gen.js',
+    'modules/image-gen.js',  // CDP fallback — hiện debugger bar nhưng giữ để backup
     'modules/download.js',
     'modules/direct-generate.js',
     'modules/polling.js'
 );
+
 
 // -- Initialization --
 chrome.storage.local.get(['komfyClientId', 'komfySingleProjectId'], (res) => {

@@ -29,6 +29,47 @@ const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 // UI callbacks map (used by polling and content scripts)
 const uiCallbacks = new Map();
 
+// ── Flow Adapter Config ──
+// Single source of truth for all Google Flow endpoints, selectors, and payload schemas.
+// Update flow-config.json when Google Flow changes their API — no code changes needed.
+let FLOW_CONFIG = null;
+
+async function loadFlowConfig() {
+    if (FLOW_CONFIG) return FLOW_CONFIG;
+    try {
+        const url = chrome.runtime.getURL('flow-config.json');
+        const res = await fetch(url);
+        FLOW_CONFIG = await res.json();
+        console.log('[Komfy] ✅ flow-config.json loaded, version:', FLOW_CONFIG.version);
+    } catch (e) {
+        console.warn('[Komfy] ⚠️ Failed to load flow-config.json:', e.message);
+        // Fallback hardcode để không crash nếu file bị thiếu
+        FLOW_CONFIG = {
+            trpc: {
+                createProject: '/fx/api/trpc/project.createProject?batch=1',
+                updateProject: '/fx/api/trpc/project.updateProject?batch=1',
+                verifyProject: '/fx/api/trpc/flow.projectInitialData'
+            },
+            googleApi: {
+                base: 'https://aisandbox-pa.googleapis.com/v1'
+            },
+            payloads: {
+                createProject: { toolName: 'PINHOLE' },
+                updateProject: { toolName: 'PINHOLE', updateMasks: ['projectTitle'] }
+            },
+            selectors: {
+                newProject: { keywords: ['dự án mới', 'new project', 'tạo dự án', 'create project'], maxTextLength: 40 }
+            }
+        };
+    }
+    return FLOW_CONFIG;
+}
+
+// Load config ngay khi service worker khởi động
+loadFlowConfig();
+
+
+
 /**
  * Send session heartbeat to FlowBroker proxy.
  * Auto-recovers if token is lost (service worker restart).

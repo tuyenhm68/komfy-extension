@@ -1,0 +1,58 @@
+{
+  "_comment": "Komfy Flow Adapter Config - Update this file when Google Flow changes endpoints or UI.",
+  "version": "2026-03-27b",
+
+  "trpc": {
+    "createProject":  "/fx/api/trpc/project.createProject?batch=1",
+    "updateProject":  "/fx/api/trpc/project.updateProject?batch=1",
+    "verifyProject":  "/fx/api/trpc/flow.projectInitialData"
+  },
+
+  "googleApi": {
+    "base":              "https://aisandbox-pa.googleapis.com/v1",
+    "generateImage":     "projects/{projectId}/flowMedia:batchGenerateImages",
+    "uploadImage":       "flow/uploadImage",
+    "generateVideo":     "video:batchAsyncGenerateVideoStartAndEndImage",
+    "generateVideoRefs": "video:batchAsyncGenerateVideoReferenceImages",
+    "pollVideo":         "video:batchCheckAsyncVideoGenerationStatus",
+    "getMedia":          "media/{mediaId}"
+  },
+
+  "imageModels": {
+    "nano banana 2": "NARWHAL",
+    "nano banana":   "GEM_PIX_0",
+    "pro":           "GEM_PIX_2"
+  },
+
+  "imageAspectRatios": {
+    "16:9":      "IMAGE_ASPECT_RATIO_LANDSCAPE",
+    "landscape": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+    "9:16":      "IMAGE_ASPECT_RATIO_PORTRAIT",
+    "portrait":  "IMAGE_ASPECT_RATIO_PORTRAIT",
+    "1:1":       "IMAGE_ASPECT_RATIO_SQUARE",
+    "square":    "IMAGE_ASPECT_RATIO_SQUARE"
+  },
+
+  "payloads": {
+    "createProject": {
+      "toolName": "PINHOLE"
+    },
+    "updateProject": {
+      "toolName": "PINHOLE",
+      "updateMasks": ["projectTitle"]
+    }
+  },
+
+  "selectors": {
+    "newProject": {
+      "keywords":      ["dự án mới", "new project", "tạo dự án", "create project"],
+      "maxTextLength": 40,
+      "strategies":    ["textContent", "aria-label", "any-element"]
+    },
+    "projectTitle": {
+      "maxTop":    80,
+      "minWidth":  50,
+      "maxWidth":  500
+    }
+  }
+}

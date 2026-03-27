@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Komfy Bridge",
-    "version": "2.0.84",
+    "version": "2.0.91",
     "description": "Connects Komfy Studio to AI platforms enables image & video generation directly from your workflow.",
     "icons": {
         "16": "icon-16.png",
@@ -77,5 +77,11 @@
             "128": "icon-128.png"
         },
         "default_title": "Komfy Bridge"
-    }
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["flow-config.json"],
+            "matches": ["<all_urls>"]
+        }
+    ]
 }

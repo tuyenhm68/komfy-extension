@@ -89,7 +89,29 @@ async function downloadBlobViaCDP(mediaId) {
         }
     }
 
-    // === Strategy 1b: aisandbox API via SERVICE WORKER fetch (bypasses CORS) ===
+    // === Strategy 1b: Electron Proxy download (★ bearer token trong Electron ASAR) ===
+    // Electron có bearer token, download thay Extension → token không lộ trong SW
+    if (rawId) {
+        try {
+            console.log('[Komfy] Trying Electron proxy download...');
+            const proxyRes = await fetch('http://127.0.0.1:3120/proxy/media/' + encodeURIComponent(rawId));
+            if (proxyRes.ok) {
+                const buf = await proxyRes.arrayBuffer();
+                const u8 = new Uint8Array(buf);
+                let b = ''; const C = 8192;
+                for (let i = 0; i < u8.length; i += C) b += String.fromCharCode.apply(null, u8.subarray(i, i + C));
+                const ct = proxyRes.headers.get('content-type') || 'video/mp4';
+                console.log('[Komfy] ✅ Electron proxy download OK:', (buf.byteLength / 1024 / 1024).toFixed(2), 'MB');
+                return { ok: true, status: 200, body: JSON.stringify({ base64: btoa(b), mimeType: ct, size: buf.byteLength }) };
+            }
+            console.warn('[Komfy] Electron proxy download failed:', proxyRes.status, '→ falling back to SW');
+        } catch (e) {
+            console.warn('[Komfy] Electron proxy not available:', e.message, '→ falling back to SW');
+        }
+    }
+
+    // === Strategy 1c: aisandbox API via SERVICE WORKER fetch (bypasses CORS) ===
+
     if (rawId && sessionData.bearerToken) {
         const swHeaders = {
             'authorization': sessionData.bearerToken,

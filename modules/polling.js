@@ -375,7 +375,7 @@ async function processTask(task) {
 
             let skipUiFallback = false;
             try {
-                console.log('[Komfy] Image → trying Direct API (fifeUrl)...');
+                console.log('[Komfy] Image → Direct API via Electron...');
                 result = await directGenerateImage(task);
                 console.log('[Komfy] Image ✅ Direct API success!');
             } catch (directErr) {
@@ -385,15 +385,16 @@ async function processTask(task) {
                     skipUiFallback = true;
                     result = { ok: false, status: 0, error: 'Image generated but download failed.' };
                 } else {
-                    console.warn('[Komfy] Image Direct API failed:', errMsg.substring(0, 100), '→ fallback to UI');
+                    console.warn('[Komfy] Image Direct API failed:', errMsg.substring(0, 100), '→ fallback to UI (CDP)');
                     result = null;
                 }
             }
 
             if (!result && !skipUiFallback) {
-                console.log('[Komfy] Image task (UI fallback) | project:', pName, '| model:', modelName, '| aspect:', aspectRatio);
+                console.log('[Komfy] Image task (UI fallback CDP) | project:', pName, '| model:', modelName, '| aspect:', aspectRatio);
                 result = await generateImageViaUI(prompt, aspectRatio, imageType, modelName, pName, imgImageInputs, task.requestId);
             }
+
 
         } else if (task.endpoint === 'DOWNLOAD_MEDIA_BLOB') {
             if (!sessionData.bearerToken) {

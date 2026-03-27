@@ -283,83 +283,45 @@ async function selectFrameFromPicker(slotType, imageDataUrl, send, sleep) {
 
 /**
  * Upload 1 frame image (dataUrl) len Google Flow API → tra ve mediaId moi.
- * Dung de lam moi mediaId truoc khi inject vao fetch hook.
+ * ★ Phase 2B: Delegate sang Electron FlowBroker (bearer token ảo trong ASAR).
  * @param {string} dataUrl - data:image/xxx;base64,...
  * @returns {string|null} - fresh mediaId or null
  */
 async function uploadFrameImage(dataUrl) {
-    if (!dataUrl || !sessionData.bearerToken || !sessionData.projectId) {
-        console.warn('[Komfy Video] uploadFrameImage: missing dataUrl/token/projectId');
+    if (!dataUrl || !sessionData.projectId) {
+        console.warn('[Komfy Video] uploadFrameImage: missing dataUrl/projectId');
         return null;
     }
 
     try {
-        // Extract base64 body from data URL
         const imageBytes = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        const mimeMatch = dataUrl.match(/^data:([^;]+);/);
+        const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
 
-        // Get fresh reCAPTCHA token
-        const tab = await findFlowTab();
-        if (tab) {
-            try {
-                const results = await chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    world: 'MAIN',
-                    func: async () => {
-                        if (window.grecaptcha && window.grecaptcha.enterprise) {
-                            try { return await window.grecaptcha.enterprise.execute('6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV', { action: 'upload_image' }); } catch(e) { return null; }
-                        }
-                        return null;
-                    }
-                });
-                if (results?.[0]?.result) sessionData.xbv = results[0].result;
-            } catch(e) {}
-        }
+        console.log('[Komfy Video] Uploading frame via Electron | size:', (imageBytes.length / 1024).toFixed(0), 'KB');
 
-        const uploadBody = JSON.stringify({
-            clientContext: {
-                projectId: sessionData.projectId,
-                tool: 'PINHOLE',
-            },
-            imageBytes: imageBytes,
-            isUserUploaded: true,
+        const result = await callFlowAction('uploadImage', {
+            projectId: sessionData.projectId,
+            imageBytes,
+            mimeType,
+            fileName: 'komfy_frame.jpg',
             isHidden: true,
-            mimeType: 'image/jpeg',
-            fileName: 'komfy_frame.jpg'
         });
 
-        console.log('[Komfy Video] Uploading frame image | size:', (imageBytes.length / 1024).toFixed(0), 'KB');
-
-        const FLOW_API = 'https://aisandbox-pa.googleapis.com/v1';
-        const uploadRes = await fetch(FLOW_API + '/flow/uploadImage', {
-            method: 'POST',
-            headers: {
-                'authorization': sessionData.bearerToken || '',
-                'x-browser-validation': sessionData.xbv || '',
-                'content-type': 'text/plain;charset=UTF-8',
-                'accept': '*/*',
-                'origin': 'https://labs.google',
-                'referer': 'https://labs.google/',
-            },
-            body: uploadBody,
-        });
-
-        const uploadText = await uploadRes.text();
-        console.log('[Komfy Video] Upload frame response:', uploadRes.status);
-
-        if (!uploadRes.ok) {
-            console.warn('[Komfy Video] Upload frame failed:', uploadRes.status, uploadText.substring(0, 200));
-            return null;
+        if (result?.ok && result?.mediaId) {
+            console.log('[Komfy Video] ✅ Frame uploaded via Electron! mediaId:', result.mediaId);
+            return result.mediaId;
         }
 
-        const parsed = JSON.parse(uploadText);
-        const mediaId = parsed?.media?.name || parsed?.mediaId;
-        console.log('[Komfy Video] ✅ Frame uploaded! mediaId:', mediaId);
-        return mediaId || null;
+        console.warn('[Komfy Video] ⚠️ Electron upload failed:', result?.error || result?.status);
+        return null;
     } catch (e) {
         console.error('[Komfy Video] uploadFrameImage error:', e.message);
         return null;
     }
 }
+
+
 
 /**
  * Xu ly I2V frame selection cho both start va end.
