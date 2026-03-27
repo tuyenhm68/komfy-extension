@@ -24,12 +24,10 @@ const VIDEO_POLL_JITTER_MS = 3000;
 
 /** Build API headers — dung text/plain de tranh CORS preflight */
 function buildApiHeaders(bearerToken) {
-    const h = {
+    return {
         'authorization': bearerToken || '',
-        'content-type': 'text/plain;charset=UTF-8',
+        'content-type': 'application/json',
     };
-    if (sessionData.xbv) h['x-browser-validation'] = sessionData.xbv;
-    return h;
 }
 
 /** Build SW (Service Worker) headers — them TAT CA session headers cho cross-origin
