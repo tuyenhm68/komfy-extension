@@ -479,6 +479,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         return true;
     }
+    if (message.action === 'CLEAR_PROJECT_CACHE') {
+        clearProjectCache().then(() => {
+            sendResponse({ ok: true });
+        });
+        return true;
+    }
     if (message.action === 'FORCE_SYNC') {
         sendToProxy().finally(() => {
             chrome.storage.local.get(['komfyProjectMap'], (stored) => {

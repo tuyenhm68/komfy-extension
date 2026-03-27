@@ -89,6 +89,44 @@ document.addEventListener('DOMContentLoaded', () => {
         if (response) updateUI(response);
     });
 
+    // Double-click to clear project cache
+    projectIdEl.addEventListener('dblclick', () => {
+        if (confirm('Clear cached Project ID? This will force Komfy Studio to create a new project.')) {
+            chrome.runtime.sendMessage({ action: 'CLEAR_PROJECT_CACHE' }, (response) => {
+                projectIdEl.textContent = 'Cleared! Syncing...';
+                setTimeout(() => {
+                    chrome.runtime.sendMessage({ action: 'FORCE_SYNC' }, (res) => {
+                        if (res) updateUI(res);
+                    });
+                }, 1000);
+            });
+        }
+    });
+    projectIdEl.style.cursor = 'pointer';
+    projectIdEl.title = 'Double-click to clear project cache';
+
+    // Clear Cache Button
+    const btnClear = document.getElementById('btn-clear');
+    if (btnClear) {
+        btnClear.addEventListener('click', () => {
+            if (confirm('Clear cached Project ID? This will force Komfy Studio to create a new project.')) {
+                btnClear.textContent = '...';
+                btnClear.disabled = true;
+                chrome.runtime.sendMessage({ action: 'CLEAR_PROJECT_CACHE' }, (response) => {
+                    btnClear.textContent = '✓';
+                    projectIdEl.textContent = 'Cleared! Syncing...';
+                    setTimeout(() => {
+                        chrome.runtime.sendMessage({ action: 'FORCE_SYNC' }, (res) => {
+                            if (res) updateUI(res);
+                        });
+                        btnClear.textContent = '🗑️ Clear';
+                        btnClear.disabled = false;
+                    }, 1000);
+                });
+            }
+        });
+    }
+
     // Sync button
     btnSync.addEventListener('click', () => {
         btnSync.textContent = '...';

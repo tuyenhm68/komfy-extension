@@ -11,6 +11,87 @@
 async function createAndRenameProject(tabId, projectName) {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+    // --- Đột phá: Tạo project trực tiếp bằng tRPC API (Không qua UI) ---
+    console.log('[Komfy] Đang thử tạo project trực tiếp qua tRPC API thay vì UI...');
+    const apiCreateResult = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async (pName) => {
+            try {
+                const endpoints = [
+                    { url: '/fx/api/trpc/project.createProject', body: { json: { projectTitle: pName, toolName: 'PINHOLE' } } },
+                    { url: '/fx/api/trpc/project.createProject?batch=1', body: { '0': { json: { projectTitle: pName, toolName: 'PINHOLE' } } } },
+                    { url: '/fx/api/trpc/project.create', body: { json: { title: pName, toolName: 'PINHOLE' } } },
+                    { url: '/fx/api/trpc/project.create?batch=1', body: { '0': { json: { title: pName, toolName: 'PINHOLE' } } } }
+                ];
+                for (const ep of endpoints) {
+                    try {
+                        const res = await fetch(ep.url, {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify(ep.body)
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            let pid = null;
+                            // Extract ID tu parseResult (non-batch vs batch)
+                            if (Array.isArray(data)) {
+                                pid = data[0]?.result?.data?.json?.project?.id || data[0]?.result?.data?.json?.id;
+                            } else {
+                                pid = data?.result?.data?.json?.project?.id || data?.result?.data?.json?.id;
+                            }
+                            if (pid) {
+                                return { ok: true, projectId: pid };
+                            }
+                        }
+                    } catch (err) {}
+                }
+                return { ok: false, reason: 'All endpoints failed or returned no ID' };
+            } catch (e) {
+                return { ok: false, error: e.message };
+            }
+        },
+        args: [projectName]
+    }).catch(e => [{ result: { ok: false, error: e.message } }]);
+
+    const apiResult = apiCreateResult?.[0]?.result;
+    if (apiResult?.ok && apiResult?.projectId) {
+        console.log('[Komfy] ✅ Project tạo qua API thành công:', apiResult.projectId);
+        
+        // Cập nhật tab sang project URL
+        const newUrl = 'https://labs.google/fx/tools/flow/project/' + apiResult.projectId;
+        await chrome.tabs.update(tabId, { url: newUrl });
+        
+        // Chờ tab tải xong hoàn thành SPA logic (quan trọng để Flow load session project mới)
+        await waitForTabLoad(tabId, 15000).catch(() => {});
+        await sleep(2000);
+        
+        // Google Flow's createProject API might ignore title and auto-generate "Mar 27..."
+        // Force an immediate explicit API rename to fix the title.
+        try {
+            console.log('[Komfy] Thực hiện rename ép khung ngay sau khi CreateAPI...');
+            await renameProjectOnFlow(projectName, apiResult.projectId);
+        } catch (renameErr) {
+            console.warn('[Komfy] Loi khi rename ép khung:', renameErr.message);
+        }
+
+        // Lưu local config sessionData và extension storage
+        const currentBackgroundData = await chrome.storage.local.get(['komfyProjectMap']).catch(() => ({}));
+        const updatedMap = currentBackgroundData.komfyProjectMap || {};
+        updatedMap[projectName] = apiResult.projectId;
+        // ★ QUAN TRỌNG: Lưu vào komfySingleProjectId để ensureFlowTab không chạy lại slow path
+        await chrome.storage.local.set({ 
+            komfyProjectMap: updatedMap,
+            komfySingleProjectId: apiResult.projectId
+        });
+        sessionData.projectId = apiResult.projectId;
+        console.log('[Komfy] ✅ Đã cache komfySingleProjectId:', apiResult.projectId.substring(0, 16) + '...');
+
+        return; // Thành công API -> Thoát khỏi hàm, tránh chạy luồng UI click.
+    } else {
+        console.warn('[Komfy] ⚠️ Tạo project bằng API thất bại, fallback sang UI Click. Lý do:', JSON.stringify(apiResult));
+    }
+
     // --- Buoc 1: Click nut "Dự án mới" / "New project" ---
     // Human-like pause before clicking (simulate user looking for button)
     await humanDelay(1000, 2500);
@@ -27,10 +108,13 @@ async function createAndRenameProject(tabId, projectName) {
             // Strategy 1: Tim theo textContent
             for (const el of candidates) {
                 const text = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-                for (const kw of keywords) {
-                    if (text.includes(kw)) {
-                        el.click();
-                        return { clicked: true, text: el.textContent.trim().substring(0, 50), strategy: 'text' };
+                // Chỉ lấy button có chuỗi text ngắnn (tránh click nhầm vào đoạn văn bản chứa từ khoá)
+                if (text.length > 0 && text.length < 40) {
+                    for (const kw of keywords) {
+                        if (text.includes(kw)) {
+                            el.click();
+                            return { clicked: true, text: el.textContent.trim().substring(0, 50), strategy: 'text' };
+                        }
                     }
                 }
             }
@@ -38,16 +122,18 @@ async function createAndRenameProject(tabId, projectName) {
             // Strategy 2: Tim theo aria-label
             for (const el of candidates) {
                 const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                for (const kw of keywords) {
-                    if (label.includes(kw)) {
-                        el.click();
-                        return { clicked: true, text: label, strategy: 'aria-label' };
+                if (label.length > 0 && label.length < 50) {
+                    for (const kw of keywords) {
+                        if (label.includes(kw)) {
+                            el.click();
+                            return { clicked: true, text: label, strategy: 'aria-label' };
+                        }
                     }
-                }
-                // Them keywords chung
-                if (label.includes('new') || label.includes('create') || label.includes('mới') || label.includes('tạo')) {
-                    el.click();
-                    return { clicked: true, text: label, strategy: 'aria-label-generic' };
+                    // Them keywords chung
+                    if (label.includes('new ') || label.includes('create ') || label.includes('mới') || label.includes('tạo')) {
+                        el.click();
+                        return { clicked: true, text: label, strategy: 'aria-label-generic' };
+                    }
                 }
             }
 
@@ -56,8 +142,8 @@ async function createAndRenameProject(tabId, projectName) {
             for (const el of allEls) {
                 const text = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
                 const r = el.getBoundingClientRect();
-                // Chi lay cac phan tu nho (button-like), khong phai container lon
-                if (r.width > 0 && r.width < 300 && r.height > 20 && r.height < 100) {
+                // Chi lay cac phan tu nho (button-like), khong phai container lon, và độ dài text ngắn
+                if (r.width > 0 && r.width < 300 && r.height > 20 && r.height < 100 && text.length > 0 && text.length < 50) {
                     for (const kw of keywords) {
                         if (text.includes(kw)) {
                             el.click();
@@ -360,11 +446,11 @@ async function createAndRenameProject(tabId, projectName) {
 }
 
 /**
- * Rename an existing project on Google Flow.
- * Tab must be on the project page (ensured via projectId in URL).
+ * Rename an existing project on Google Flow via direct tRPC API.
+ * Uses confirmed payload format from project.updateProject.
  *
- * @param {string} newName - New project name (e.g. "[KS] Quảng cáo ABC")
- * @param {string} projectId - Project UUID to navigate to
+ * @param {string} newName - New project name (e.g. "[KS] Komfy Studio")
+ * @param {string} projectId - Project UUID
  */
 async function renameProjectOnFlow(newName, projectId) {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -372,107 +458,45 @@ async function renameProjectOnFlow(newName, projectId) {
     if (!tab) throw new Error('No Flow tab found');
     const tabId = tab.id;
 
-    // Navigate to the project if not already there
-    const currentUrl = tab.url || '';
-    if (!currentUrl.includes('/project/' + projectId)) {
-        const projectUrl = 'https://labs.google/fx/tools/flow/project/' + projectId;
-        await chrome.tabs.update(tabId, { url: projectUrl });
-        await waitForTabLoad(tabId, 15000).catch(() => {});
-        await sleep(2000);
+    console.log('[Komfy] Đổi tên project "' + projectId.substring(0, 12) + '..." thành "' + newName + '" qua tRPC API...');
+
+    // Inject vào tab context để có đầy đủ cookies/session
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async (pid, title) => {
+            try {
+                // ★ Exact payload format from captured logs
+                const payload = {
+                    '0': {
+                        json: {
+                            projectId: pid,
+                            toolName: 'PINHOLE',
+                            projectInfo: { projectTitle: title },
+                            updateMasks: ['projectTitle']
+                        }
+                    }
+                };
+                const res = await fetch('/fx/api/trpc/project.updateProject?batch=1', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify(payload)
+                });
+                const text = await res.text();
+                return { ok: res.ok, status: res.status, body: text.substring(0, 300) };
+            } catch (e) {
+                return { ok: false, error: e.message };
+            }
+        },
+        args: [projectId, newName]
+    }).catch(e => [{ result: { ok: false, error: e.message } }]);
+
+    const result = results?.[0]?.result;
+    if (result?.ok) {
+        console.log('[Komfy] ✅ Project renamed via project.updateProject API');
+        return;
     }
 
-    // Reuse the same rename logic as createAndRenameProject
-    console.log('[Komfy] Renaming project to "' + newName + '"...');
-    try {
-        await chrome.debugger.attach({ tabId }, '1.3');
-        const send = (method, params) => new Promise((res, rej) => {
-            chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
-                if (chrome.runtime.lastError) rej(new Error(chrome.runtime.lastError.message));
-                else res(result);
-            });
-        });
-
-        // Try tRPC API rename first (fastest, no UI interaction needed)
-        const renameResult = await send('Runtime.evaluate', {
-            expression: `(async function(pid, newName){
-                var endpoints = [
-                    'project.updateProjectTitle',
-                    'project.renameProject',
-                    'project.updateProject',
-                    'project.update',
-                    'project.setTitle'
-                ];
-                var payloads = [
-                    { '0': { json: { projectId: pid, title: newName } } },
-                    { '0': { json: { projectId: pid, name: newName } } },
-                    { '0': { json: { id: pid, title: newName } } },
-                    { '0': { json: { id: pid, name: newName } } },
-                ];
-                for (var ep of endpoints) {
-                    for (var payload of payloads) {
-                        try {
-                            var res = await fetch('/fx/api/trpc/' + ep + '?batch=1', {
-                                method: 'POST',
-                                headers: { 'content-type': 'application/json' },
-                                credentials: 'include',
-                                body: JSON.stringify(payload)
-                            });
-                            if (res.ok) {
-                                var text = await res.text();
-                                return { ok: true, endpoint: ep, status: res.status };
-                            }
-                        } catch(e) {}
-                    }
-                }
-                return { ok: false, error: 'All tRPC endpoints failed' };
-            })(${JSON.stringify(projectId)}, ${JSON.stringify(newName)})`,
-            returnByValue: true,
-            awaitPromise: true,
-        });
-
-        if (renameResult?.result?.value?.ok) {
-            console.log('[Komfy] ✅ Project renamed via tRPC:', renameResult.result.value.endpoint);
-            return;
-        }
-
-        // Fallback: React setter + CDP keyboard (same as createAndRenameProject)
-        console.log('[Komfy] tRPC rename failed, trying UI approach...');
-        const setResult = await send('Runtime.evaluate', {
-            expression: `(function(newName){
-                var inputs = document.querySelectorAll('input');
-                for (var i = 0; i < inputs.length; i++) {
-                    var inp = inputs[i];
-                    var r = inp.getBoundingClientRect();
-                    if (r.top < 80 && r.width > 50 && r.width < 500) {
-                        inp.focus();
-                        var nativeSetter = Object.getOwnPropertyDescriptor(
-                            window.HTMLInputElement.prototype, 'value'
-                        ).set;
-                        nativeSetter.call(inp, newName);
-                        inp.dispatchEvent(new Event('input', { bubbles: true }));
-                        inp.dispatchEvent(new Event('change', { bubbles: true }));
-                        return { ok: true, value: inp.value };
-                    }
-                }
-                return { ok: false, reason: 'no input found' };
-            })(${JSON.stringify(newName)})`,
-            returnByValue: true,
-            awaitPromise: false,
-        });
-
-        if (setResult?.result?.value?.ok) {
-            await sleep(300);
-            await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
-            await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
-            await sleep(300);
-            await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 500, y: 400, button: 'left', clickCount: 1 });
-            await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 500, y: 400, button: 'left', clickCount: 1 });
-            await sleep(300);
-            console.log('[Komfy] ✅ Project renamed via React setter');
-        } else {
-            console.warn('[Komfy] Could not rename project — no title input found');
-        }
-    } finally {
-        chrome.debugger.detach({ tabId }).catch(() => {});
-    }
+    console.warn('[Komfy] ⚠️ project.updateProject thất bại (status:', result?.status, '). Body:', result?.body || result?.error);
+    // Không throw - project đã tồn tại, sẽ tiếp tục dùng project này dù tên chưa đúng
 }

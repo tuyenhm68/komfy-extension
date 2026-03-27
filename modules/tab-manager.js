@@ -33,7 +33,7 @@ async function clearProjectCache() {
     console.log('[Komfy] Xoa cache project "' + KOMFY_FIXED_PROJECT + '"...');
     // Clear in-memory verification timestamp
     delete _projectVerifiedAt[KOMFY_FIXED_PROJECT];
-    await chrome.storage.local.remove('komfySingleProjectId');
+    await chrome.storage.local.remove(['komfySingleProjectId', 'komfyProjectMap']);
     sessionData.projectId = null;
     console.log('[Komfy] Da xoa cache project.');
 }
