@@ -1,0 +1,87 @@
+{
+    "manifest_version": 3,
+    "name": "Komfy Bridge",
+    "version": "2.0.124",
+    "description": "Connects Komfy Studio to AI platforms enables image & video generation directly from your workflow.",
+    "icons": {
+        "16": "icon-16.png",
+        "32": "icon-32.png",
+        "48": "icon-48.png",
+        "128": "icon-128.png"
+    },
+    "permissions": [
+        "webRequest",
+        "tabs",
+        "scripting",
+        "debugger",
+        "storage"
+    ],
+    "host_permissions": [
+        "\u003call_urls\u003e",
+        "http://127.0.0.1:3120/*",
+        "http://localhost:3120/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "*://labs.google/fx/*"
+            ],
+            "include_globs": [
+                "*labs.google/fx/*/tools/flow*",
+                "*labs.google/fx/tools/flow*"
+            ],
+            "js": [
+                "content_fetch_interceptor.js"
+            ],
+            "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
+                "*://labs.google/fx/*"
+            ],
+            "include_globs": [
+                "*labs.google/fx/*/tools/flow*",
+                "*labs.google/fx/tools/flow*"
+            ],
+            "js": [
+                "content_main.js"
+            ],
+            "run_at": "document_end",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
+                "*://labs.google/fx/*"
+            ],
+            "include_globs": [
+                "*labs.google/fx/*/tools/flow*",
+                "*labs.google/fx/tools/flow*"
+            ],
+            "js": [
+                "content_isolated.js"
+            ],
+            "run_at": "document_end",
+            "world": "ISOLATED"
+        }
+    ],
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "icon-16.png",
+            "32": "icon-32.png",
+            "48": "icon-48.png",
+            "128": "icon-128.png"
+        },
+        "default_title": "Komfy Bridge"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["flow-config.json"],
+            "matches": ["<all_urls>"]
+        }
+    ]
+}
