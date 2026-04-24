@@ -1,7 +1,7 @@
 ﻿{
     "manifest_version": 3,
     "name": "Komfy Bridge",
-    "version": "2.0.149",
+    "version": "2.0.153",
     "description": "Connects Komfy Studio to AI platforms enables image & video generation directly from your workflow.",
     "icons": {
         "16": "icon-16.png",
@@ -14,7 +14,8 @@
         "tabs",
         "scripting",
         "debugger",
-        "storage"
+        "storage",
+        "clipboardWrite"
     ],
     "host_permissions": [
         "\u003call_urls\u003e",
@@ -63,6 +64,16 @@
             ],
             "js": [
                 "content_isolated.js"
+            ],
+            "run_at": "document_end",
+            "world": "ISOLATED"
+        },
+        {
+            "matches": [
+                "https://chatgpt.com/*"
+            ],
+            "js": [
+                "modules/chatgpt-isolated.js"
             ],
             "run_at": "document_end",
             "world": "ISOLATED"
